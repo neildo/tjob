@@ -22,7 +22,6 @@ Prototype job service contains the following components
 - tjobs = gRPC service to manage and control arbitrary process execution as job
 - tjob = CLI to interact with tjobs service over gRPC using mTLS authentication and authorization 
 - tjob = Library to run arbitrary process with resource limits inside cgroups
-- jail = Sandbox to isolate mounts from arbitrary process
 
 ### Assumptions
 - Support single instance of Linux 64-bit with cgroupv2 enabled
@@ -233,7 +232,7 @@ type (
       Args []string
       
       // Set underlying os/exec.Cmd.Dir.
-	   Dir string
+      Dir string
 
       // CPUPercent represents the quota of all cores. 
       CPUPercent int
@@ -258,6 +257,12 @@ type (
       buf   *bytes.Buffer
       lines []string
    }
+
+   Cgroup interface {
+      Id() string
+      Fd() int
+      Close() error
+   }
 )
 
 // NewJob creates Job for the given command path and args without starting until called Run()
@@ -275,15 +280,18 @@ func (j *Job) Status() Status
 // Used directly with Go standard library os/exec.Command as io.Writer. 
 func NewLineBuffer()  *LineBuffer
 
-// Write makes LineBuffer implement the io.Writer interface
+// Write implements io.Writer interface
 func (l *LineBuffer) Write(p []byte) (n int, err error)
 
-// Lines returns lines of output from the Cmd
+// Lines returns lines of output from Job
 func (l *LineBuffer) Lines() []string
+
+// OpenCgroup creates cgroupv2 with the given controls.
+func OpenCgroup(id string, cpu, mem, rbps, wbps int) Cgroup, error
 
 ```
 
-#### TODO: Example
+#### Example
 ```golang
 package main
 
@@ -293,24 +301,27 @@ import (
 
 func main() {
    // Start a long-running process, capture stdout and stderr
-	job := tjob.NewJob("ping", "127.0.0.1")
+   job := tjob.NewJob("find", "/", "-name","*.txt")
+   job.CPUPercent = 20
+   job.MemoryMB = 20
+   job.ReadBPS = 20 * 1024 * 1024
+   job.WriteBPS = 20 * 1024 * 1024
 
-   // TODO: Add resource limits
-	statusChan := job.Run() // non-blocking
+   statusChan := job.Run() // non-blocking
 
-	// Stop command after 2 seconds
-	go func() {
-		<-time.After(10 * time.Seconds)
-		job.Stop()
-	}()
+   // Stop command after 2 seconds
+   go func() {
+      <-time.After(2 * time.Seconds)
+      job.Stop()
+   }()
 
-	// Check if command is done
-	select {
-	case finalStatus := <-statusChan:
-		// done
-	default:
-		// no, still running
-	}
+   // Check if command is done
+   select {
+   case finalStatus := <-statusChan:
+      // done
+   default:
+      // no, still running
+   }
 
    s := job.Status()
    n := len(s.Lines)
@@ -321,12 +332,10 @@ func main() {
 ### Resource Control
 > Add resource control for CPU, Memory and Disk IO per job using cgroups.
 
-#### Proof of Concept
-```bash
-# target Ubuntu 24 ARM
-$ uname -a
-Linux vagrant 5.15.0-92-generic 102-Ubuntu SMP Wed Jan 10 09:37:39 UTC 2024 aarch64 aarch64 aarch64 GNU/Linux
+#### Control Group Interface Files
+Library writes to the following files to control the CPU, Memory, and Disk IO.
 
+```bash
 # make cgroup for jobId
 $ mkdir /sys/fs/cgroup/jobId
 
@@ -354,7 +363,7 @@ sda                         8:0    0    64G  0 disk
   └─ubuntu--vg-ubuntu--lv 253:0    0  30.5G  0 lvm  /
 sr0                        11:0    1  1024M  0 rom
 
-# limit both reads BPS and writes BPS to 2M
+# limit both reads BPS and writes BPS to 20M. simplified max riops and wiops.
 $ echo "8:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/jobId/io.max
 
 ```
@@ -363,69 +372,208 @@ See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Docume
 ### Resource Isolation
 > Add resource isolation for using PID, mount, and networking namespaces.
 
-#### TODO: Proof of Concept
-
+#### Proof of Concept
 ```golang
+//go:build linux
+
 package main
 
 import (
-    "os"
-    "os/exec"
-    "syscall"
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
 )
 
-// ./jail run <command>
+// tjobs <command> -> tjobs jail <command> -> <command>
 func main() {
-    switch os.Args[1] {
-    case "run":
-        run()
-    case "child":
-        child()
-    default:
-        panic("Error")
-    }
+	fmt.Println(os.Args)
+	switch os.Args[1] {
+	case "jail":
+		jail()
+	default: // simulate tjobs receive request to run job
+		run()
+	}
 }
 
 func run() {
-    cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
-    // TODO: How can I capture stdout and stderr?
-    cmd.Stdin = os.Stdin
-    cmd.Stdout = os.Stdout
-    cmd.Stderr = os.Stderr
-    cmd.SysProcAttr = &syscall.SysProcAttr{
-      Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-      Unshareflags: syscall.CLONE_NEWNS,
-		// TODO: UseCgroupFD: true,
-    }
-
-    must(cmd.Run())
+	// MUST clone self with new PID and networking namespace before mount namespace
+	cmd := exec.Command("/proc/self/exe", append([]string{"jail"}, os.Args[1:]...)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
+		Unshareflags: syscall.CLONE_NEWNS,
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must(cmd.Run())
 }
 
-func child() {
-    syscall.Sethostname([]byte("job"))
-    // change the filesystem
-    must(syscall.Chdir("/"))
-    must(syscall.Mount("proc", "proc", "proc", 0, ""))
+func jail() {
+	// MUST override the parent /proc before running command. linux unmount upon exit
+	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
 
-    cmd := exec.Command(os.Args[2], os.Args[3:]...)
-    // TODO: How can I capture stdout and stderr?
-    cmd.Stdin = os.Stdin
-    cmd.Stdout = os.Stdout
-    cmd.Stderr = os.Stderr
+	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-    must(cmd.Run())
+	must(cmd.Run())
 }
 
 func must(err error) {
-    if err != nil {
-        panic(err)
-    }
+	if err != nil {
+		panic(err)
+	}
 }
+
 ```
+#### Example
+```bash
+# identify operating system
+vagrant@vagrant:/vagrant/tjob$ uname -a
+Linux vagrant 5.15.0-92-generic 102-Ubuntu SMP Wed Jan 10 09:37:39 UTC 2024 aarch64 aarch64 aarch64 GNU/Linux
+
+# shell into root
+$ sudo bash
+
+# show running procs
+root@vagrant:/vagrant/tjob# ps
+    PID TTY          TIME CMD
+   2914 pts/1    00:00:00 sudo
+   2915 pts/1    00:00:00 bash
+   2922 pts/1    00:00:00 ps
+
+# ping localhost
+root@vagrant:/vagrant/tjob# ping 127.0.0.1 -c 1
+PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
+64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.038 ms
+
+--- 127.0.0.1 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.038/0.038/0.038/0.000 ms
+
+# jail bash with chain of procs
+root@vagrant:/vagrant/tjob# go run cmd/tjobs/main.go bash
+[/tmp/go-build1960547998/b001/exe/main bash]
+[/proc/self/exe jail bash]
+
+# show different chain of procs
+root@vagrant:/vagrant/tjob# ps
+    PID TTY          TIME CMD
+      1 pts/1    00:00:00 exe
+      6 pts/1    00:00:00 bash
+     13 pts/1    00:00:00 ps
+
+# show no network access
+root@vagrant:/vagrant/tjob# ping 127.0.0.1
+ping: connect: Network is unreachable
+
+# exit jail
+root@vagrant:/vagrant/tjob# exit
+exit
+
+# show original procs
+root@vagrant:/vagrant/tjob# ps
+    PID TTY          TIME CMD
+   2914 pts/1    00:00:00 sudo
+   2915 pts/1    00:00:00 bash
+   2977 pts/1    00:00:00 ps
+
+# ping localhost again
+root@vagrant:/vagrant/tjob# ping 127.0.0.1 -c 1
+PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
+64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.025 ms
+
+--- 127.0.0.1 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.025/0.025/0.025/0.000 ms
+```
+
 [Deep into Container — Build your own container with Golang](https://dev.to/devopsvn/deep-into-container-build-your-own-container-with-golang-3f5e)
 
-### TODO: Test Plan
-```
-TODO
+### Test Plan
 
+#### Alice can view status and logs before and after job stopped.
+```bash
+# run job
+$ tjob run find / -name *.txt
+f8a9e533
+
+# see active job
+$ tjob ps
+JOB ID    COMMAND        CREATED     STATUS
+f8a9e533  "find / ..."   3 secs ago  Up 3 secs
+
+# see logs
+$ tjob logs f8a9e533
+/usr/share/go-1.22/src/cmd/go/testdata/script/mod_get_retract.txt
+...
+/usr/share/go-1.22/src/cmd/go/testdata/script/mod_get_major.txt
+/usr/share/go-1.22/src/cmd/go/testdata/script/test_chatty_parallel_success.txt
+
+# stop job
+$ tjob stop f8a9e533
+f8a9e533
+
+# see all job
+$ tjob ps -a 
+JOB ID    COMMAND        CREATED      STATUS
+f8a9e533  "find / ..."   10 secs ago  Exit (137)
+
+# see logs
+$ tjob logs f8a9e533
+/usr/share/go-1.22/src/cmd/go/testdata/script/mod_get_retract.txt
+...
+/usr/share/go-1.22/src/cmd/go/testdata/script/mod_get_major.txt
+/usr/share/go-1.22/src/cmd/go/testdata/script/test_chatty_parallel_success.txt
+```
+#### Alice can limit CPU
+```bash
+# limit CPU
+$ tjob run sha1sum /dev/random
+33967794
+$ ps -p $(pgrep sha1sum) -o %cpu
+%CPU
+ 20
+ ```
+#### Alice can limit IO
+```bash
+# limit IO
+$ tjob run dd if=/dev/zero of=/tmp/tjob bs=512M count=1
+38ee3d9c
+# watch IO
+$ iostat 1 -d -h -y -k -p sda
+Device:            tps    kB_read/s    kB_wrtn/s    kB_read    kB_wrtn
+...
+```
+#### Alice cannot run job with network access 
+```bash
+$ ping localhost -c 1
+ping: connect: Network is unreachable
+```
+#### Alice cannot run job to see other procs
+```bash
+$ tjob run ps
+650d452d
+$ tjob logs 650d452d
+    PID TTY          TIME CMD
+      1 pts/1    00:00:00 exe
+      3 pts/1    00:00:00 ps
+```
+#### Bob cannot see job status and logs created by Alice
+```bash
+# cannot see status above
+$ tjob ps -a
+JOB ID    COMMAND        CREATED     STATUS
+
+# cannot see logs above
+$ tjob logs f8a9e533
+$ 
+```
+#### Bob cannot stop job created by Alice
+```bash
+# cannot stop job
+$ tjob stop f8a9e533
+$ 
 ```
