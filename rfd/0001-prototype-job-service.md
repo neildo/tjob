@@ -33,12 +33,18 @@ Prototype job service contains the following components
 - Network Access Jobs
 
 ### Authentication & Authorization
-> Use mTLS authentication and verify client certificate. Set up strong set of cipher suites for TLS and good crypto setup for certificates. Do not use any other authentication protocols on top of mTLS.
-Use a simple authorization scheme.
+> Use mTLS authentication and verify client certificate. Set up strong set of cipher suites for TLS and good crypto setup for certificates. Do not use any other authentication protocols on top of mTLS. Use a simple authorization scheme.
 
-For mutual authentication (mTLS), both client and server requires certificates from trusted certificate authority (CA). Instead of well-known CA like Verisign, OpenSSL can generate the RSA 256 certificates requried for the CA, clients, and servers for the **scope of this prototype.**
+For mutual authentication (mTLS), both client and server require certificates from trusted certificate authorities (CA).
+Client and server communicate via TLS 1.3 as the minimum version. The following cipher suites are supported:
 
-The client certificates must contain the common name (CN) to restrict jobs created by it and no other. Any authenticated client can run a new job. 
+- TLS_AES_128_GCM_SHA256
+- TLS_AES_256_GCM_SHA384
+- TLS_CHACHA20_POLY1305_SHA256
+
+Client certificates must contain the common name (CN) to restrict jobs created by it and no other. Any authenticated client can run a new job. Clients validate the Subject Alt Name (SAN) matches the server DNS. 
+
+Instead of well-known CA like Verisign, OpenSSL can generate the AES 256 GSM certificates required for the CA, clients, and servers for the **scope of this prototype.** Client and server certificates originate from the same self-signed CA; thereby, establishing the trusted relationship from the same source.
 
 ### CLI UX
 ---
@@ -48,16 +54,27 @@ The client certificates must contain the common name (CN) to restrict jobs creat
 tjobs
 ``` 
 #### Description
-Server for `tjob` CLI with hardcoded value for prototype
-- localhost:8080
-- ca = .tjob/ca.crt
-- cert = .tjob/svc.crt
-- key = .tjob/svc.key
-- max cpu percentage = 20
-- max memory in MB = 20MB
-- max reads in bytes/sec = 20MB
-- max writes in bytes/sec = 20MB
+Server for `tjob` CLI with limits per job
 ---
+#### Options
+```
+-cpu
+   max cpu percentage (default 20)
+-mem
+   max memory in MB (default 20)
+-rbps
+   max reads in bytes/sec (default 20MB)
+-wbps
+   max writes in bytes/sec (default 20MB)
+-host
+   server url (default localhost:8080)
+-ca
+   CA cert file (default ./tjob/ca.crt)
+-cert
+   CLI cert file (default ./tjob/svc.crt)
+-key
+   CLI key file (default ./tjob/svc.key)
+```
 
 ```
 tjob run [OPTIONS] [COMMAND] [ARG...]
@@ -78,7 +95,7 @@ Runs `COMMAND` in isolation from host
 #### Examples
 ```bash
 $ tjob run echo 'hello'
-1fbb6e8a-788c-45bf-9996-1b45bb6a99d0
+1fbb6e8a
 
 $ tjob run sleep 1000
 ```
@@ -88,7 +105,7 @@ $ tjob run sleep 1000
 tjob stop [OPTIONS] JOB
 ```
 #### Description
-Signal `SIGTERM` first and `SIGKILL` after grace period
+Signal `SIGKILL`
 #### Options
 ```
 -ca
@@ -101,14 +118,12 @@ Signal `SIGTERM` first and `SIGKILL` after grace period
 ---
 
  ```
-tjob ps [OPTIONS] 
+tjob ps [OPTIONS] JOB
 ```
 #### Description
-Show running jobs 
+Show status of `JOB`
 #### Options
 ```
--a
-   show all jobs 
 -ca
    CA cert file (default ./tjob/ca.crt)
 -cert
@@ -118,10 +133,9 @@ Show running jobs
 ```
 #### Examples
 ```bash
-$ tjob ps
+$ tjob ps 1fcc4f8b
 JOB ID    COMMAND        CREATED     STATUS
 1fcc4f8b  "echo hello"   1 min ago   Exited (0) 1 min ago
-1abb6e8a  "sleep 1000"   3 secs ago  Up 3 secs    
 ```
 ---
 
@@ -153,60 +167,64 @@ service Job {
   rpc Run(RunRequest) returns (RunResponse);
   rpc Stop(StopRequest) returns (StopResponse);
   rpc Status(StatusRequest) returns (StatusResponse);
-  rpc Logs(LogsRequest) returns (LogsResponse);
+  rpc Logs(LogsRequest) returns (stream LogsResponse);
 }
 
 message RunRequest {
-  string path = 1;
-  repeated string args = 2;
+  string path = 1; // path of process
+
+  repeated string args = 2; // additional arguments
 }
 
 message RunResponse {
-  option string jobId = 1;
-  option string error = 2;
+  option string job_id = 1;
 }
 
 message StopRequest {
-  string jobId = 1;
+  string job_id = 1;
 }
 
 message StopResponse {
-   option string error = 2;
 }
 
 message Status {
-   string jobId = 1;
-   string cmd = 2;
-   Timestamp started = 3;
-   Timestamp stoped = 4;
-   int32 elapseSecs = 5;
-   option int64 exit = 6;
-   option string error = 7;
+   string job_id = 1;
+   
+   string cmd = 2; // full command line
+
+   Timestamp started = 3; // job start time in UTC
+   
+   int32 ranSecs = 4; // seconds ran since start
+   
+   option int32 exit = 5; // exit code from job
+
+   option string error = 6; // any error from the job
 }
 
 message StatusRequest {
-  bool all = 1;
+  string job_id = 1;
 }
 
 message StatusResponse {
-   repeated Status jobs = 1;
-   option string error = 2;
+   Status job = 1;
 }
 
 message LogsRequest {
-   string jobId = 1;
+   string job_id = 1;
 }
 
 message LogsResponse {
-   repeated string logs = 1;
+   bytes out = 1;
 }
-
 ```
-### Library
+### Library UX
+---
 > Worker library with methods to start/stop/query status and get the output of a job. 
 > Library should be able to stream the output of a running job. 
 > Output should be from start of process execution. 
 > Multiple concurrent clients should be supported.
+
+Library starts job with resource limits, returns status, and enable streaming output for multiple concurrent clients.
 
 ```golang
 package tjob
@@ -217,15 +235,12 @@ type (
       Cmd string 
       Started int64 // Unix ts (nanoseconds), zero if not started
       Stopped int64 // Unix ts (nanoseconds), zero if not started or running
-      Elapsed float64 // seconds, zero if not started
-      Exit int64 // exit code
+      Ran float64 // seconds, zero if not started
+      Exit int32 // exit code
       Error error // go error
-      Lines []string // combined stdout & stderr
    }
 
    Job struct {      
-      *sync.Mutex
-
       // Set underlying os/exec.Cmd.Path
       Path string
 
@@ -246,50 +261,47 @@ type (
       
       // WriteBPS represents the max bytes write per second by proc
       WriteBPS int
-      
-      statusChan  chan Status // nil until Run() called
-      stdout      *LineBuffer 
+
+      // log file bind to os/exec.Cmd.Stdout and os/exec.Cmd.Stderr
+      logs *os.File
    }
 
-   // Unbounded buffer for command output and safe for multiple goroutines to read by calling Lines()
-   LineBuffer struct {
-      *sync.Mutex
-
-      buf   *bytes.Buffer
-      lines []string
-   }
-
-   Cgroup interface {
-      Id() string
-      Fd() int
-      Close() error
+   JobReader struct {
+      job *Job
+      logs io.ReadCloser
+      wait time.Duration
    }
 )
 
-// NewJob creates Job for the given command path and args without starting until called Run()
+// NewJob creates Job for the given command path and args until Start()
 func NewJob(path string, args ...string) *Job
 
-// Run starts the command and returns a channel that callers can receive the final Status when done
-func (j *Job) Run() <-chan Status
+// Start starts the command 
+func (j *Job) Start() error
 
-// Stop signals SIGTERM on the process group and idempotent.
+// Stop signal SIGKILL on the process group and idempotent.
 func (j *Job) Stop() error
 
-// Status returns the Status at any time and concurrently safe for multiple goroutines. 
+// Status returns the Status at any time and concurrency safe. 
 func (j *Job) Status() Status
 
-// Used directly with Go standard library os/exec.Command as io.Writer. 
-func NewLineBuffer()  *LineBuffer
+// Logs returns JobReader for polling logs until process stops
+func (j *Job) Logs(period time.Duration) (io.ReadCloser, error) {
+   return JobReader{job: j, logs: os.OpenFile(j.logs.Name(), os.O_RDONLY, 0660), wait: period}
+}
 
-// Write implements io.Writer interface
-func (l *LineBuffer) Write(p []byte) (n int, err error)
-
-// Lines returns lines of output from Job
-func (l *LineBuffer) Lines() []string
-
-// OpenCgroup creates cgroupv2 with the given controls.
-func OpenCgroup(id string, cpu, mem, rbps, wbps int) Cgroup, error
-
+// Read reads n bytes into buffer and return EOF only when Job stops
+func (r *JobReader) Read(buffer []byte) (n int, err error) {
+	n, err = r.logs.Read(buffer)
+	// wait and ignore EOF until stopped
+	if n == 0 && err == io.EOF && r.job.Status().Stopped == 0 {
+		if n == 0 {
+			<-time.After(r.wait)
+		}
+      err = nil
+	}
+	return
+}
 ```
 
 #### Example
@@ -298,56 +310,100 @@ package main
 
 import (
    "github.com/neildo/tjob"
+
+   "math"
 )
 
+// Stream polls the job logs to print them every period
+func Stream(j *Job, period time.Duration, count int64) {
+   buffer := make([]byte, 1024)
+
+   logs, _ := job.Logs(period)
+   defer must(reader.Close())
+
+   // poll for logs from job
+   for count > 0 {
+      
+      // read ignores EOF and waits if process still running
+      n, err := logs.Read(buffer); 
+      if err != nil {
+         fmt.Println(err.Error())
+         break
+      } 
+      if n > 0 {
+         fmt.Print("%s", buffer[:n])
+      }
+      count-- 
+   }
+}
+
 func main() {
-   // Start a long-running process, capture stdout and stderr
+   // create a long-running process, capture stdout and stderr
    job := tjob.NewJob("find", "/", "-name","*.txt")
    job.CPUPercent = 20
    job.MemoryMB = 20
    job.ReadBPS = 20 * 1024 * 1024
    job.WriteBPS = 20 * 1024 * 1024
 
-   statusChan := job.Run() // non-blocking
+   // Start job
+   must(job.Start())
 
-   // Stop command after 2 seconds
+   // Status before Stop
+   s := job.Status()
+   fmt.Println("%+v", s)
+
+   // Stop job after 10 seconds
    go func() {
-      <-time.After(2 * time.Seconds)
-      job.Stop()
+      // simulate streaming for client 1
+      Stream(job, 1 * time.Seconds, 10)
+      must(job.Stop())
    }()
 
-   // Check if command is done
-   select {
-   case finalStatus := <-statusChan:
-      // done
-   default:
-      // no, still running
-   }
+   // simulate streaming for client 2
+   Stream(job, 1 * time.Seconds, math.MaxInt64)
 
+   // Status after Stop
    s := job.Status()
-   n := len(s.Lines)
-   fmt.Println(s.Lines[n-1])
+   fmt.Println("%+v", s)
 }
 
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
 ```
-### Resource Control
+### Resource Controls & Isolation 
+---
 > Add resource control for CPU, Memory and Disk IO per job using cgroups.
+> Add resource isolation for using PID, mount, and networking namespaces.
+
+Namespaces isolate processes to run independently of each other on the same machine with the following types: 
+
+- PID: The Process ID namespace provides an independent set of process IDs (PIDs) from other namespaces. PID namespaces make the first process created as PID 1.
+- MNT: Mount namespaces enables independent mount/unmount of mount points.
+- NET: Network namespaces create an independent network stack for the process.
+- UTS: UNIX Time-Sharing namespaces enable separate hostname and domain name the process.
+- USER: User namespaces create separate set of UIDS and GIDS for the process.
+- IPC: IPC namespaces isolate processes from inter-process communication between processes in different IPC namespaces.
+
+For the scope above, Library creates new PID, MNT, NET, and cgroup namespace for arbitrary processes.
 
 #### Control Group Interface Files
-Library writes to the following cgroupv2 interafce files to limit the CPU, Memory, and Disk IO.
+Library writes to the following cgroupv2 interafce files to limit the CPU, Memory, and Disk IO. 
 
 ```bash
-# make cgroup for jobId
-$ mkdir /sys/fs/cgroup/jobId
+# make cgroup for job_id adding new proc later
+$ mkdir /sys/fs/cgroup/job_id
 
 # enable cgroup for cpu, memory, and io
-$ echo "+cpu +memory +io" > /sys/fs/cgroup/jobId/cgroup.subtree_control
+$ echo "+cpu +memory +io" > /sys/fs/cgroup/job_id/cgroup.subtree_control
 
 # limits cpu <cpu_quota> and <cpu_period> to 20%
-$ echo "20000 100000" > /sys/fs/cgroup/jobId/cpu.max
+$ echo "20000 100000" > /sys/fs/cgroup/job_id/cpu.max
 
 # limit memory to 20M
-$ echo "20M" > /sys/fs/cgroup/jobId/memory.max
+$ echo "20M" > /sys/fs/cgroup/job_id/memory.max
 
 $ lsblk
 NAME                      MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
@@ -365,15 +421,14 @@ sda                         8:0    0    64G  0 disk
 sr0                        11:0    1  1024M  0 rom
 
 # limit both reads BPS and writes BPS to 20M. simplified max riops and wiops.
-$ echo "8:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/jobId/io.max
+$ echo "8:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/job_id/io.max
 
 ```
 See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt)
 
-### Resource Isolation
-> Add resource isolation for using PID, mount, and networking namespaces.
-
 #### Proof of Concept
+Library clones the current process with new PID, MNT, NET, and cgroup namespace before running the given command.
+
 ```golang
 //go:build linux
 
@@ -398,11 +453,18 @@ func main() {
 }
 
 func run() {
-	// MUST clone self with new PID and networking namespace before mount namespace
+   // open cgroup created ahead of time
+   cgroup, err := os.OpenFile("/sys/fs/cgroup/job_id", os.O_RDONLY, 0)
+	must(err)
+   defer must(cgroup.Close())
+
+	// MUST clone self with new PID, MNT, NET, and cgroup namespace
 	cmd := exec.Command("/proc/self/exe", append([]string{"jail"}, os.Args[1:]...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
 		Unshareflags: syscall.CLONE_NEWNS,
+	   CgroupFD: int(cgroup.Fd()),
+      UseCgroupFD: cgroup.Fd() != nil,
 	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -501,8 +563,8 @@ rtt min/avg/max/mdev = 0.025/0.025/0.025/0.000 ms
 $ tjob run find / -name *.txt
 f8a9e533
 
-# see active job
-$ tjob ps
+# see job
+$ tjob ps f8a9e533
 JOB ID    COMMAND        CREATED     STATUS
 f8a9e533  "find / ..."   3 secs ago  Up 3 secs
 
@@ -517,8 +579,8 @@ $ tjob logs f8a9e533
 $ tjob stop f8a9e533
 f8a9e533
 
-# see all job
-$ tjob ps -a 
+# see job
+$ tjob ps f8a9e533
 JOB ID    COMMAND        CREATED      STATUS
 f8a9e533  "find / ..."   10 secs ago  Exit (137)
 
@@ -565,9 +627,8 @@ $ tjob logs 650d452d
 #### Bob cannot see job status and logs created by Alice
 ```bash
 # cannot see status above
-$ tjob ps -a
-JOB ID    COMMAND        CREATED     STATUS
-
+$ tjob ps f8a9e533
+$
 # cannot see logs above
 $ tjob logs f8a9e533
 $ 
