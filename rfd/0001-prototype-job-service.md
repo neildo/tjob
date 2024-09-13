@@ -15,21 +15,22 @@ This prototype has two goals:
 
  * help Teleport assess how candidates reason API design, write production code, and talk through problems before solving them.
 
- * help candidates simulate the typical work activities at Teleport.
+ * help candidates simulate typical work activities at Teleport.
 
 ## Details
 Prototype job service contains the following components
-- tjobs = gRPC service to manage and control arbitrary process execution as job
-- tjob = CLI to interact with tjobs service over gRPC using mTLS authentication and authorization 
-- tjob = Library to run arbitrary process with resource limits inside cgroups
+- `tjobs` = gRPC service to manage and control arbitrary process 
+- `tjob` = CLI to interact with `tjobs` over gRPC using mTLS authentication and authorization 
+- `tjob` = Library to run arbitrary process with resource limits inside cgroups
 
 ### Assumptions
-- Support single instance of Linux 64-bit with cgroupv2 enabled
+- Single instance of Linux 64-bit with cgroupv2 enabled
 
 ### Out of Scope
 - High Availability 
 - Observability 
 - Recycling Jobs
+- Network Access Jobs
 
 ### Authentication & Authorization
 > Use mTLS authentication and verify client certificate. Set up strong set of cipher suites for TLS and good crypto setup for certificates. Do not use any other authentication protocols on top of mTLS.
@@ -37,7 +38,7 @@ Use a simple authorization scheme.
 
 For mutual authentication (mTLS), both client and server requires certificates from trusted certificate authority (CA). Instead of well-known CA like Verisign, OpenSSL can generate the RSA 256 certificates requried for the CA, clients, and servers for the **scope of this prototype.**
 
-The client certificate must contain the common name (CN) to restrict jobs created by it and no other clients. Any authenticated client can run a new job. 
+The client certificates must contain the common name (CN) to restrict jobs created by it and no other. Any authenticated client can run a new job. 
 
 ### CLI UX
 ---
@@ -333,7 +334,7 @@ func main() {
 > Add resource control for CPU, Memory and Disk IO per job using cgroups.
 
 #### Control Group Interface Files
-Library writes to the following files to control the CPU, Memory, and Disk IO.
+Library writes to the following cgroupv2 interafce files to limit the CPU, Memory, and Disk IO.
 
 ```bash
 # make cgroup for jobId
