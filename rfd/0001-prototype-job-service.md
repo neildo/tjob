@@ -101,6 +101,8 @@ Runs `COMMAND` in isolation from host
 
 #### Options
 ```
+-host
+   server url (default localhost:8080)
 -ca
    CA cert file (default ./tjob/ca-cert.pem)
 -cert
@@ -125,6 +127,8 @@ tjob stop [OPTIONS] JOB
 Signal `SIGKILL`
 #### Options
 ```
+-host
+   server url (default localhost:8080)
 -ca
    CA cert file (default ./tjob/ca-cert.pem)
 -cert
@@ -141,6 +145,8 @@ tjob ps [OPTIONS] JOB
 Show status of `JOB`
 #### Options
 ```
+-host
+   server url (default localhost:8080)
 -ca
    CA cert file (default ./tjob/ca-cert.pem)
 -cert
@@ -163,6 +169,8 @@ tjob logs [OPTIONS] JOB
 Output `STDOUT` and `STDERR` from start of `JOB` to now
 #### Options
 ```
+-host
+   server url (default localhost:8080)
 -ca
    CA cert file (default ./tjob/ca-cert.pem)
 -cert
