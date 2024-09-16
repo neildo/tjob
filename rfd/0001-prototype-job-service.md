@@ -438,7 +438,7 @@ sda                         8:0    0    64G  0 disk
 sr0                        11:0    1  1024M  0 rom
 
 # limit both reads BPS and writes BPS to 20M. simplified max riops and wiops.
-$ echo "8:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/job_id/io.max
+$ echo "253:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/job_id/io.max
 
 ```
 See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt)
