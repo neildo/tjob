@@ -54,6 +54,7 @@ openssl req -x509 -newkey Ed25519 -nodes -keyout cli-key.pem -out cli-cert.pem -
 # generate Bob's key and cert
 openssl req -x509 -newkey Ed25519 -nodes -keyout bob-key.pem -out bob-cert.pem -subj "/CN=bob" -CA ca-cert.pem -CAkey ca-key.pem -days 30
 ```
+Many TLS clients (including all major web browsers) don't support Ed25519 certs beyond the scope of this prototype.
 
 Client and server communicate via TLS 1.3 as the minimum version. The following cipher suites are supported:
 
