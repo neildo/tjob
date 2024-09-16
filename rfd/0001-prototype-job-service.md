@@ -36,15 +36,32 @@ Prototype job service contains the following components
 > Use mTLS authentication and verify client certificate. Set up strong set of cipher suites for TLS and good crypto setup for certificates. Do not use any other authentication protocols on top of mTLS. Use a simple authorization scheme.
 
 For mutual authentication (mTLS), both client and server require certificates from trusted certificate authorities (CA).
+Client and server certificates originate from the same self-signed CA; thereby, establishing the trusted relationship from the same source.
+Client certificates must contain the common name (CN) to restrict jobs created by it and no other. Any authenticated client can run a new job. Clients validate the Subject Alt Name (SAN) matches the server DNS. 
+
+```bash
+cd .tjob
+
+# generate CA's private key and self-signed certificate
+openssl req -x509 -newkey Ed25519 -days 365 -nodes -keyout ca-key.pem -out ca-cert.pem -subj "/CN=issuer"
+
+# generate server's key and cert
+openssl req -x509 -newkey Ed25519 -nodes -keyout svc-key.pem -out svc-cert.pem -subj "/CN=tjobs" -addext "subjectAltName=DNS:localhost" -CA ca-cert.pem -CAkey ca-key.pem -days 30
+
+# generate Alice's key and cert
+openssl req -x509 -newkey Ed25519 -nodes -keyout cli-key.pem -out cli-cert.pem -subj "/CN=alice" -CA ca-cert.pem -CAkey ca-key.pem -days 30
+
+# generate Bob's key and cert
+openssl req -x509 -newkey Ed25519 -nodes -keyout bob-key.pem -out bob-cert.pem -subj "/CN=bob" -CA ca-cert.pem -CAkey ca-key.pem -days 30
+```
+
 Client and server communicate via TLS 1.3 as the minimum version. The following cipher suites are supported:
 
 - TLS_AES_128_GCM_SHA256
 - TLS_AES_256_GCM_SHA384
 - TLS_CHACHA20_POLY1305_SHA256
 
-Client certificates must contain the common name (CN) to restrict jobs created by it and no other. Any authenticated client can run a new job. Clients validate the Subject Alt Name (SAN) matches the server DNS. 
-
-Instead of well-known CA like Verisign, OpenSSL can generate the AES 256 GSM certificates required for the CA, clients, and servers for the **scope of this prototype.** Client and server certificates originate from the same self-signed CA; thereby, establishing the trusted relationship from the same source.
+Note: [Go does not allow configuring supported cipher suites when using TLS 1.3](https://go.dev/blog/tls-cipher-suites).
 
 ### CLI UX
 ---
@@ -69,11 +86,11 @@ Server for `tjob` CLI with limits per job
 -host
    server url (default localhost:8080)
 -ca
-   CA cert file (default ./tjob/ca.crt)
+   CA cert file (default ./tjob/ca-cert.pem)
 -cert
-   CLI cert file (default ./tjob/svc.crt)
+   server cert file (default ./tjob/svc-cert.pem)
 -key
-   CLI key file (default ./tjob/svc.key)
+   server key file (default ./tjob/svc-key.pem)
 ```
 
 ```
@@ -85,11 +102,11 @@ Runs `COMMAND` in isolation from host
 #### Options
 ```
 -ca
-   CA cert file (default ./tjob/ca.crt)
+   CA cert file (default ./tjob/ca-cert.pem)
 -cert
-   CLI cert file (default ./tjob/cli.crt)
+   CLI cert file (default ./tjob/cli-cert.pem)
 -key
-   CLI key file (default ./tjob/cli.key)
+   CLI key file (default ./tjob/cli-key.pem)
 ```
 
 #### Examples
@@ -109,11 +126,11 @@ Signal `SIGKILL`
 #### Options
 ```
 -ca
-   CA cert file (default ./tjob/ca.crt)
+   CA cert file (default ./tjob/ca-cert.pem)
 -cert
-   CLI cert file (default ./tjob/cli.crt)
+   CLI cert file (default ./tjob/cli-cert.pem)
 -key
-   CLI key file (default ./tjob/cli.key)
+   CLI key file (default ./tjob/cli-key.pem)
 ```
 ---
 
@@ -125,11 +142,11 @@ Show status of `JOB`
 #### Options
 ```
 -ca
-   CA cert file (default ./tjob/ca.crt)
+   CA cert file (default ./tjob/ca-cert.pem)
 -cert
-   CLI cert file (default ./tjob/cli.crt)
+   CLI cert file (default ./tjob/cli-cert.pem)
 -key
-   CLI key file (default ./tjob/cli.key)
+   CLI key file (default ./tjob/cli-key.pem)
 ```
 #### Examples
 ```bash
@@ -147,11 +164,11 @@ Output `STDOUT` and `STDERR` from start of `JOB` to now
 #### Options
 ```
 -ca
-   CA cert file (default ./tjob/ca.crt)
+   CA cert file (default ./tjob/ca-cert.pem)
 -cert
-   CLI cert file (default ./tjob/cli.crt)
+   CLI cert file (default ./tjob/cli-cert.pem)
 -key
-   CLI key file (default ./tjob/cli.key)
+   CLI key file (default ./tjob/cli-key.pem)
 ```
 
 ### Proto Specification
