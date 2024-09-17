@@ -296,9 +296,9 @@ type (
    }
 
    JobReader struct {
-      job *Job
-      logs io.ReadCloser
-      wait time.Duration
+      job      *Job
+      logs     io.ReadCloser
+	   inotify  *os.File
    }
 )
 
@@ -315,18 +315,50 @@ func (j *Job) Stop() error
 func (j *Job) Status() Status
 
 // Logs returns JobReader for polling logs until process stops
-func (j *Job) Logs(period time.Duration) (io.ReadCloser, error) {
-   return JobReader{job: j, logs: os.OpenFile(j.logs.Name(), os.O_RDONLY, 0660), wait: period}
+func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
+   return NewJobReader(ctx, j)
+}
+
+func NewJobReader(ctx context.Context, j *Job) (io.ReadCloser, error) {
+   l, err := os.OpenFile(j.logs.Name(), os.O_RDONLY, 0660)
+   if err != nil {
+      return nil, err
+   }
+   // reader specific notify
+   fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
+   if err != nil {
+      defer l.Close()
+      return nil, err
+   }
+   // close file to unblock reads if context is done
+   file := os.NewFile(uintptr(fd), l.Name())
+	go func() {
+		<-ctx.Done()
+		file.Close()
+	}()
+   return JobReader{ctx: ctx, job: j, logs: l, inotify: file}
 }
 
 // Read reads n bytes into buffer and return EOF only when Job stops
 func (r *JobReader) Read(buffer []byte) (n int, err error) {
-	n, err = r.logs.Read(buffer)
+	n, err = r.job.logs.Read(buffer)
 	// wait and ignore EOF until stopped
 	if n == 0 && err == io.EOF && r.job.Status().Stopped == 0 {
-		// TODO: watch inotify for write events to the file
-		if n == 0 {
-			<-time.After(r.wait)
+
+      if n == 0 {
+         // watch for writes and close event
+         wd, err := syscall.InotifyAddWatch(r.inotify.Fd(), r.job.logs.Name(), syscall.IN_MODIFY | syscall.IN_CLOSE)
+         if err != nil {
+            return 0, err
+         }
+         // TODO: verify remove watch clears out inotify events
+         defer syscall.InotifyRmWatch(r.inotify.Fd(), uint32(wd))
+
+         // block until closed or write event
+         b := make([]byte, syscall.SizeofInotifyEvent*128)
+         if _, err = r.inotify.Read(b); err != nil {
+            return 0, err
+         }
 		}
       err = nil
 	}
@@ -342,14 +374,15 @@ import (
    "github.com/neildo/tjob"
 
    "math"
+   "context"
 )
 
-// Stream polls the job logs to print them every period
-func Stream(j *Job, period time.Duration, count int64) {
+// Stream polls the job logs to print them 
+func Stream(j *Job, ctx context.Context, count int64) {
    buffer := make([]byte, 1024)
 
-   logs, _ := job.Logs(period)
-   defer must(reader.Close())
+   logs, _ := job.Logs(ctx)
+   defer must(logs.Close())
 
    // poll for logs from job
    for count > 0 {
@@ -384,13 +417,16 @@ func main() {
 
    // Stop job after 10 seconds
    go func() {
+      ctx, cancel := context.WithTimeout(context.TODO(), 10 * time.Seconds)
+      defer cancel()
+
       // simulate streaming for client 1
-      Stream(job, 1 * time.Seconds, 10)
+      Stream(job, ctx, math.MaxInt64)
       must(job.Stop())
    }()
 
    // simulate streaming for client 2
-   Stream(job, 1 * time.Seconds, math.MaxInt64)
+   Stream(job, context.TODO(), math.MaxInt64)
 
    // Status after Stop
    s := job.Status()
