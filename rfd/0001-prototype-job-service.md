@@ -77,6 +77,8 @@ Server for `tjob` CLI with limits per job
 ---
 #### Options
 ```
+-mnt
+   $MAJ:$MIN device number for mnt namespace
 -cpu
    max cpu percentage (default 20)
 -mem
@@ -455,7 +457,7 @@ $ echo "253:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/jo
 See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt)
 
 #### Proof of Concept
-Library clones the current process with new PID, MNT, NET, and cgroup namespace before running the given command.
+`jail.go` clones the current process with new PID, MNT, NET, and cgroup namespace before running the given command.
 
 ```golang
 //go:build linux
@@ -508,7 +510,6 @@ func jail() {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	must(cmd.Run())
 }
 
@@ -517,9 +518,62 @@ func must(err error) {
 		panic(err)
 	}
 }
-
 ```
+#### How does `jail.go` work?
+
+1. Let's run `jail.go` to isolate `bash`.
+
+```bash
+$ go run jail.go bash
+[/tmp/go-build1960547998/b001/exe/main bash]
+```
+2. Open the file descriptor for the `/sys/fs/cgroup/job_id` cgroup with [limits on CPU, Memory, and IO](#control-group-interface-files).
+```golang
+   cgroup, err := os.OpenFile("/sys/fs/cgroup/job_id", os.O_RDONLY, 0)
+```
+3. Clone current process using `/proc/self/exe jail` command.
+
+   `Cloneflags` to isolate these namespaces:
+   - PID (`CLONE_NEWPID`)
+   - NET (`CLONE_NEWNET`)
+   - MNT (`CLONE_NEWNS`)
+
+   `Unshareflags: syscall.CLONE_NEWNS` overrides default propagation of mounted files to private for isolated MNT namespace.
+   
+   `CgroupFD: int(cgroup.Fd())` assigns cgroup by file descriptor.
+```golang
+	cmd := exec.Command("/proc/self/exe", append([]string{"jail"}, os.Args[1:]...)...)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
+		Unshareflags: syscall.CLONE_NEWNS,
+		CgroupFD: int(cgroup.Fd()),
+		UseCgroupFD: cgroup.Fd() != nil,
+	}
+```
+4. Run the clone with same file descriptors for `Stdin`, `Stdout`, and `Stderr` as the parent.
+```golang
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+  	must(cmd.Run())
+```
+5. See `/proc/self/exe jail` process in output. 
+```bash
+[/proc/self/exe jail bash]
+```
+6. Isolate the parent mount for `/proc` before running `bash` with the same file descriptors.
+```golang 
+	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
+	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must(cmd.Run())
+```
+
 #### Example
+See the complete example of running `jail.go` below.
 ```bash
 # identify operating system
 vagrant@vagrant:/vagrant/tjob$ uname -a
@@ -545,7 +599,7 @@ PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
 rtt min/avg/max/mdev = 0.038/0.038/0.038/0.000 ms
 
 # jail bash with chain of procs
-root@vagrant:/vagrant/tjob# go run cmd/tjobs/main.go bash
+root@vagrant:/vagrant/tjob# go run jail.go bash
 [/tmp/go-build1960547998/b001/exe/main bash]
 [/proc/self/exe jail bash]
 
