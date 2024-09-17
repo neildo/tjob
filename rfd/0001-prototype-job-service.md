@@ -322,7 +322,7 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 	n, err = r.logs.Read(buffer)
 	// wait and ignore EOF until stopped
 	if n == 0 && err == io.EOF && r.job.Status().Stopped == 0 {
-      // TODO: watch inotify for write events to the file
+		// TODO: watch inotify for write events to the file
 		if n == 0 {
 			<-time.After(r.wait)
 		}
