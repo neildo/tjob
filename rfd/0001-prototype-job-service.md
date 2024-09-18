@@ -206,7 +206,7 @@ message RunRequest {
 }
 
 message RunResponse {
-  option string job_id = 1;
+  optional string job_id = 1;
 }
 
 message StopRequest {
@@ -223,11 +223,11 @@ message Status {
 
    Timestamp started = 3; // job start time in UTC
    
-   int32 ranSecs = 4; // seconds ran since start
+   Duration ran = 4; // duration since start
    
-   option int32 exit = 5; // exit code from job
+   optional int32 exit = 5; // exit code from job
 
-   option string error = 6; // any error from the job
+   optional string error = 6; // any error from the job
 }
 
 message StatusRequest {
@@ -262,9 +262,9 @@ type (
    Status struct {
       Pid  int
       Cmd string 
-      Started int64 // Unix ts (nanoseconds), zero if not started
-      Stopped int64 // Unix ts (nanoseconds), zero if not started or running
-      Ran float64 // seconds, zero if not started
+      Started time.Time
+      Stopped time.Time
+      Ran time.Duration 
       Exit int32 // exit code
       Error error // go error
    }
@@ -493,7 +493,7 @@ $ echo "253:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/jo
 See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt)
 
 #### Proof of Concept
-`jail.go` clones the current process with new PID, MNT, NET, and cgroup namespace before running the given command.
+This section discusses how `tjobs` gRPC service spawns a job with resource isolation and controls. The code block simulates what happens when `tjobs` receives a request to run a job. `tjobs` service must clones itself (i.e. `/proc/self/exe`) to apply resource isolations and controls for each job. The code block assumes the `/sys/fs/cgroup/job_id` cgroup configured outside of it. More discussion on the code exists below it.
 
 ```golang
 //go:build linux
