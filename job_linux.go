@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	cgroupRoot     = "/sys/fs/cgroup/tjobs"
 	cpuPeriod      = 100000
 	cgroupFileMode = 0o500
 )
@@ -38,46 +39,47 @@ func mount() error {
 }
 
 // jail creates the namespaces required by the job to isolate exec.Cmd
-func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
-	cgroupPath := fmt.Sprintf("/sys/fs/cgroup/%s", j.Id)
 
-	// create a directory structure like /sys/fs/cgroup/<uuid>
-	if err := os.MkdirAll(cgroupPath, cgroupFileMode); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", cgroupPath, err)
+func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
+	cgroupJob := fmt.Sprintf("%s/%s", cgroupRoot, j.Id)
+
+	// create a directory structure like /sys/fs/cgroup/tjobs/<job_id>
+	if err := os.MkdirAll(cgroupJob, cgroupFileMode); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", cgroupJob, err)
 	}
 
 	// enable cpu, io, and memory controllers
-	path := cgroupPath + "/cgroup.subtree_control"
+	path := cgroupRoot + "/cgroup.subtree_control"
 	if err := os.WriteFile(path, []byte("+cpu +io +memory"), cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-
 	// limit cpu
 	if j.CPUPercent > 0 {
 		n := float32(j.CPUPercent) / 100 * cpuPeriod
 		content := fmt.Sprintf("%d %d", int(n), cpuPeriod)
-		path = cgroupPath + "/cpu.max"
+		path = cgroupJob + "/cpu.max"
 		if err := os.WriteFile(path, []byte(content), cgroupFileMode); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 
 	// limit memory
-	path = cgroupPath + "/memory.max"
+	path = cgroupJob + "/memory.max"
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%dM", j.MemoryMB)), cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
 	// limit rbps and wbps
 	content := fmt.Sprintf("%s rbps=%d wbps=%d riops=max wiops=max", j.Mnt, j.ReadBPS, j.WriteBPS)
-	path = cgroupPath + "/io.max"
+	path = cgroupJob + "/io.max"
 	if err := os.WriteFile(path, []byte(content), cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+
 	// open cgroup file to jail clone
-	cgroup, err := os.OpenFile(cgroupPath, os.O_RDONLY, 0)
+	cgroup, err := os.OpenFile(cgroupJob, os.O_RDONLY, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", cgroupJob, err)
 	}
 
 	args := append([]string{JailOp, j.Path}, j.Args...)
@@ -86,7 +88,7 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
 		Unshareflags: syscall.CLONE_NEWNS,
 		CgroupFD:     int(cgroup.Fd()),
-		UseCgroupFD:  int(cgroup.Fd()) != 0,
+		UseCgroupFD:  true,
 	}
 	j.cgroup = cgroup
 

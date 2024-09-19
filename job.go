@@ -139,12 +139,12 @@ func (j *Job) Start(ctx context.Context) error {
 	// jail the arbitrary process with required isolation
 	cmd, err := jail(ctx, j)
 	if err != nil {
-		return err
+		return fmt.Errorf("jail: %w", err)
 	}
 	// write stdout and stderr to log file
 	logs, err := os.CreateTemp("", "*")
 	if err != nil {
-		return err
+		return fmt.Errorf("log file: %w", err)
 	}
 	cmd.Stdout = logs
 	cmd.Stderr = logs
@@ -157,7 +157,7 @@ func (j *Job) Start(ctx context.Context) error {
 		logs.Close()
 		j.status.Error = err
 		j.status.StoppedAt = time.Now()
-		return err
+		return fmt.Errorf("start: %w", err)
 	}
 	j.logs = logs
 	j.status.Pid = cmd.Process.Pid
@@ -214,8 +214,7 @@ func (j *Job) Stop() error {
 	}
 	j.status.Error = ErrForceStop
 
-	// Signal the process group (-pid) avoid child procs hangings
-	return syscall.Kill(-j.status.Pid, syscall.SIGKILL)
+	return syscall.Kill(j.status.Pid, syscall.SIGKILL)
 }
 
 // Status returns the Status at any time and concurrency safe.

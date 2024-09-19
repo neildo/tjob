@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -19,7 +20,7 @@ var (
 	mem  = flag.Int("mem", 10, "limit Memory in MB")
 	rbps = flag.Int("rbps", 1024, "limit reads in bytes per second")
 	wbps = flag.Int("wbps", 1024, "limit writes in bytes per second")
-	wait = flag.Int("wait", 10, "wait time in seconds")
+	wait = flag.Int("wait", 5, "wait time in seconds")
 )
 
 func main() {
@@ -33,9 +34,18 @@ func main() {
 	if len(os.Args) < 2 {
 		log.Fatalf("Usage: %s <command>", os.Args[0])
 	}
+	args := os.Args
+	if runtime.GOOS == "linux" {
+		if *mnt == "" {
+			log.Fatalf("Usage: %s -mnt <$MAJ:$MIN> <command>", os.Args[0])
+		}
+		args = os.Args[3:]
+	} else {
+		args = os.Args[1:]
+	}
 
 	// create new job with resource limits
-	job := tjob.NewJob(os.Args[1], os.Args[2:]...)
+	job := tjob.NewJob(args[0], args[1:]...)
 	job.Mnt = *mnt
 	job.CPUPercent = *cpu
 	job.MemoryMB = *mem
