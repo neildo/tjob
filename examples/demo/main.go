@@ -20,7 +20,7 @@ var (
 	mem  = flag.Int("mem", 10, "limit Memory in MB")
 	rbps = flag.Int("rbps", 1024, "limit reads in bytes per second")
 	wbps = flag.Int("wbps", 1024, "limit writes in bytes per second")
-	wait = flag.Int("wait", 5, "wait time in seconds")
+	wait = flag.Int("wait", 3, "wait time in seconds")
 )
 
 func main() {
@@ -52,8 +52,7 @@ func main() {
 	job.ReadBPS = *rbps
 	job.WriteBPS = *wbps
 
-	// Status before Stop
-	fmt.Printf("%s %+v\n", job.Id, job.Status())
+	fmt.Println(job.Id)
 
 	// Start job with fail safe timeout
 	c, cancel := context.WithTimeout(context.TODO(), time.Hour)
@@ -97,8 +96,7 @@ func main() {
 
 	// wait for job to stop
 	if err := job.Wait(); err != nil {
-		log.Fatal(err)
+		fmt.Printf("%+v\n", job.Status())
 	}
 	wg.Wait()
-
 }

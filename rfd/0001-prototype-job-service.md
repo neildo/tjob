@@ -460,16 +460,16 @@ Library writes to the following cgroupv2 interafce files to limit the CPU, Memor
 
 ```bash
 # make cgroup for job_id adding new proc later
-$ mkdir /sys/fs/cgroup/job_id
+$ mkdir -p /sys/fs/cgroup/tjobs/job_id
 
 # enable cgroup for cpu, memory, and io
-$ echo "+cpu +memory +io" > /sys/fs/cgroup/job_id/cgroup.subtree_control
+$ echo "+cpu +memory +io" > /sys/fs/cgroup/tjobs/cgroup.subtree_control
 
 # limits cpu <cpu_quota> and <cpu_period> to 20%
-$ echo "20000 100000" > /sys/fs/cgroup/job_id/cpu.max
+$ echo "20000 100000" > /sys/fs/cgroup/tjobs/job_id/cpu.max
 
 # limit memory to 20M
-$ echo "20M" > /sys/fs/cgroup/job_id/memory.max
+$ echo "20M" > /sys/fs/cgroup/tjobs/job_id/memory.max
 
 $ lsblk
 NAME                      MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
@@ -487,13 +487,13 @@ sda                         8:0    0    64G  0 disk
 sr0                        11:0    1  1024M  0 rom
 
 # limit both reads BPS and writes BPS to 20M. simplified max riops and wiops.
-$ echo "253:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/job_id/io.max
+$ echo "253:0 rbps=2097152 wbps=2097152 riops=max wiops=max" > /sys/fs/cgroup/tjobs/job_id/io.max
 
 ```
 See kernel documentation on [Control Group v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt)
 
 #### Proof of Concept
-This section discusses how `tjobs` gRPC service spawns a job with resource isolation and controls. The code block simulates what happens when `tjobs` receives a request to run a job. `tjobs` service must clones itself (i.e. `/proc/self/exe`) to apply resource isolations and controls for each job. The code block assumes the `/sys/fs/cgroup/job_id` cgroup configured outside of it. More discussion on the code exists below it.
+This section discusses how `tjobs` gRPC service spawns a job with resource isolation and controls. The code block simulates what happens when `tjobs` receives a request to run a job. `tjobs` service must clones itself (i.e. `/proc/self/exe`) to apply resource isolations and controls for each job. The code block assumes the `/sys/fs/cgroup/tjobs/job_id` cgroup configured outside of it. More discussion on the code exists below it.
 
 ```golang
 //go:build linux
@@ -520,7 +520,7 @@ func main() {
 
 func run() {
    // open cgroup created ahead of time
-   cgroup, err := os.OpenFile("/sys/fs/cgroup/job_id", os.O_RDONLY, 0)
+   cgroup, err := os.OpenFile("/sys/fs/cgroup/tjobs/job_id", os.O_RDONLY, 0)
 	must(err)
    defer must(cgroup.Close())
 
@@ -563,9 +563,9 @@ func must(err error) {
 $ go run jail.go bash
 [/tmp/go-build1960547998/b001/exe/main bash]
 ```
-2. Open the file descriptor for the `/sys/fs/cgroup/job_id` cgroup with [limits on CPU, Memory, and IO](#control-group-interface-files).
+2. Open the file descriptor for the `/sys/fs/cgroup/tjobs/job_id` cgroup with [limits on CPU, Memory, and IO](#control-group-interface-files).
 ```golang
-   cgroup, err := os.OpenFile("/sys/fs/cgroup/job_id", os.O_RDONLY, 0)
+   cgroup, err := os.OpenFile("/sys/fs/cgroup/tjobs/job_id", os.O_RDONLY, 0)
 ```
 3. Clone current process using `/proc/self/exe jail` command.
 
