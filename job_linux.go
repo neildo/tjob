@@ -39,7 +39,6 @@ func mount() error {
 }
 
 // jail creates the namespaces required by the job to isolate exec.Cmd
-
 func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 	cgroupJob := fmt.Sprintf("%s/%s", cgroupRoot, j.Id)
 
@@ -128,7 +127,6 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 			if err != nil {
 				return 0, os.NewSyscallError("inotify_add_watch", err)
 			}
-			// TODO: verify remove watch clears out inotify events
 			defer syscall.InotifyRmWatch(int(r.inotify.Fd()), uint32(wd))
 
 			// block until closed or write event
