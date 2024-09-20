@@ -8,18 +8,28 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	JailOp = ".tjob"
+	jailOp = ".tjob"
+)
+
+const (
+	notInited = iota
+	startable
+	jailed
 )
 
 var (
-	ErrInvalidArgs = errors.New("invalid args")
-	ErrForceStop   = errors.New("force stop")
-	startable      = false
+	ErrAlreadyInited        = errors.New("already inited")
+	ErrAlreadyStarted       = errors.New("already started")
+	ErrAlreadyJailed        = errors.New("already startable")
+	ErrInvalidArgs          = errors.New("invalid args")
+	ErrForceStop            = errors.New("force stop")
+	procState         int32 = notInited
 )
 
 type (
@@ -58,21 +68,24 @@ type (
 		// WriteBPS represents the max bytes write per second by proc
 		WriteBPS int
 
-		// Read-write lock for job state
-		rw sync.RWMutex
-
-		// jail path to isolate process
-		jailPath string
-
 		// log file bind to os/exec.Cmd.Stdout and os/exec.Cmd.Stderr
 		logs *os.File
 
 		// cgroup file assigned to job
 		cgroup *os.File
 
-		status Status
+		// closed when done running
+		doneCh chan struct{}
 
-		doneCh chan struct{} // closed when done running
+		// started prevents the same process called twice
+		started int32
+
+		// jail path to isolate process
+		jailPath string
+
+		// Read-write lock for job status
+		rw     sync.RWMutex
+		status Status
 	}
 
 	JobReader struct {
@@ -83,23 +96,27 @@ type (
 )
 
 func Init() error {
-	// allow starting job
-	startable = true
+	// MUST confirm Init() was called before starting any job
+	if !atomic.CompareAndSwapInt32(&procState, notInited, startable) {
+		return ErrAlreadyInited
+	}
 
-	if len(os.Args) < 3 && os.Args[1] == JailOp {
+	if len(os.Args) < 3 && os.Args[1] == jailOp {
 		return ErrInvalidArgs
 	}
 	// skip run command in jail
-	if len(os.Args) < 3 || os.Args[1] != JailOp {
+	if len(os.Args) < 3 || os.Args[1] != jailOp {
 		return nil
 	}
-	fmt.Println(os.Args)
-	// disallow starting job on jailed proc
-	startable = false
-
+	// cannot start another job in the jailed state
+	if !atomic.CompareAndSwapInt32(&procState, startable, jailed) {
+		return ErrAlreadyJailed
+	}
 	if err := mount(); err != nil {
 		return err
 	}
+
+	// run the arbitrary proc in jail
 	args := os.Args[2:]
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
@@ -108,6 +125,7 @@ func Init() error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
+	// return error to force early exit by caller
 	return fmt.Errorf(cmd.ProcessState.String())
 }
 
@@ -123,17 +141,13 @@ func (s Status) Stopped() bool {
 
 // Start starts the command
 func (j *Job) Start(ctx context.Context) error {
-	if !startable {
-		panic("unsafe start")
+	// disallow starting another job already jailed
+	if procState == startable {
+		return ErrAlreadyJailed
 	}
-	// return any error from status if already stopped
-	if j.Status().Stopped() {
-		return j.status.Error
-	}
-
-	// already started nothing to do
-	if j.Status().Started() {
-		return nil
+	// prevent same proc starting this job twice
+	if !atomic.CompareAndSwapInt32(&j.started, 0, 1) {
+		return ErrAlreadyStarted
 	}
 
 	// jail the arbitrary process with required isolation

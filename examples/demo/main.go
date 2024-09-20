@@ -52,8 +52,6 @@ func main() {
 	job.ReadBPS = *rbps
 	job.WriteBPS = *wbps
 
-	fmt.Println(job.Id)
-
 	// Start job with fail safe timeout
 	c, cancel := context.WithTimeout(context.TODO(), time.Hour)
 	defer cancel()
@@ -96,7 +94,7 @@ func main() {
 
 	// wait for job to stop
 	if err := job.Wait(); err != nil {
-		fmt.Printf("%+v\n", job.Status())
+		fmt.Printf("JobId=%s\nStatus=%+v\n", job.Id, job.Status())
 	}
 	wg.Wait()
 }

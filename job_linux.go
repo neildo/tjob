@@ -81,7 +81,7 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("%s: %w", cgroupJob, err)
 	}
 
-	args := append([]string{JailOp, j.Path}, j.Args...)
+	args := append([]string{jailOp, j.Path}, j.Args...)
 	cmd := exec.CommandContext(ctx, j.jailPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
