@@ -126,26 +126,29 @@ func NewJobReader(ctx context.Context, filename string, d Doner) (io.ReadCloser,
 	go func() {
 		<-ctx.Done()
 		file.Close()
+		l.Close()
 	}()
 	return &JobReader{doner: d, logs: l, inotify: file}, nil
 }
 
 // Read reads n bytes into buffer and return EOF only when Job stops
 func (r *JobReader) Read(buffer []byte) (n int, err error) {
-	n, err = r.logs.Read(buffer)
+	for n == 0 && err == nil {
+		n, err = r.logs.Read(buffer)
 
-	// wait and ignore EOF until stopped
-	if n == 0 && err == io.EOF && !r.doner.Done() {
+		// wait and ignore EOF until stopped
+		if n == 0 && err == io.EOF && !r.doner.Done() {
 
-		// sufficiently size buffer for events
-		b := make([]byte, syscall.SizeofInotifyEvent*syscall.NAME_MAX+1)
+			// sufficiently size buffer for events
+			b := make([]byte, syscall.SizeofInotifyEvent*syscall.NAME_MAX+1)
 
-		// return EOF if file close by context
-		if n, err = r.inotify.Read(b); errors.Is(err, fs.ErrClosed) {
-			return 0, io.EOF
+			// return EOF if file close by context
+			if _, e := r.inotify.Read(b); errors.Is(e, fs.ErrClosed) {
+				return 0, io.EOF
+			}
+			// clear EOF and try again
+			err = nil
 		}
-		// keep reading
-		err = ErrReadAgain
 	}
 	return
 }

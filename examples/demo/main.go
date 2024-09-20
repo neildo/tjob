@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"runtime"
@@ -78,7 +77,7 @@ func main() {
 			if n > 0 {
 				fmt.Printf("%s", string(buffer[:n]))
 			}
-			if err == io.EOF {
+			if err != nil {
 				break
 			}
 		}

@@ -269,8 +269,9 @@ func (j *Job) Done() bool {
 
 // Logs returns JobReader for polling logs until process stops
 func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
-	if j.logs == nil {
-		return nil, ErrNotStartable
+	// no logs if never started
+	if j.state == 0 {
+		return nil, ErrNotStarted
 	}
 	return NewJobReader(ctx, j.logs.Name(), j)
 }
