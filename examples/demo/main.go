@@ -16,11 +16,11 @@ import (
 
 var (
 	mnt  = flag.String("mnt", "", "$MAJ:$MIN device number")
-	cpu  = flag.Int("cpu", 10, "limit CPU %")
-	mem  = flag.Int("mem", 10, "limit Memory in MB")
-	rbps = flag.Int("rbps", 1024, "limit reads in bytes per second")
-	wbps = flag.Int("wbps", 1024, "limit writes in bytes per second")
-	wait = flag.Int("wait", 3, "wait time in seconds")
+	cpu  = 20
+	mem  = 10
+	rbps = 1024
+	wbps = 1024
+	wait = 120
 )
 
 func main() {
@@ -47,10 +47,10 @@ func main() {
 	// create new job with resource limits
 	job := tjob.NewJob(args[0], args[1:]...)
 	job.Mnt = *mnt
-	job.CPUPercent = *cpu
-	job.MemoryMB = *mem
-	job.ReadBPS = *rbps
-	job.WriteBPS = *wbps
+	job.CPUPercent = cpu
+	job.MemoryMB = mem
+	job.ReadBPS = rbps
+	job.WriteBPS = wbps
 
 	// Start job with fail safe timeout
 	c, cancel := context.WithTimeout(context.TODO(), time.Hour)
@@ -65,7 +65,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		ctx, cancel := context.WithTimeout(context.TODO(), time.Duration(*wait)*time.Second)
+		ctx, cancel := context.WithTimeout(context.TODO(), time.Duration(wait)*time.Second)
 		defer cancel()
 
 		buffer := make([]byte, 1024)
@@ -74,16 +74,12 @@ func main() {
 
 		// poll for logs from job
 		for {
-			// read ignores EOF and waits if process still running
 			n, err := logs.Read(buffer)
-			if err != nil {
-				if err != io.EOF {
-					fmt.Println(err.Error())
-				}
-				break
-			}
 			if n > 0 {
 				fmt.Printf("%s", string(buffer[:n]))
+			}
+			if err == io.EOF {
+				break
 			}
 		}
 

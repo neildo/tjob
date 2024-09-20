@@ -11,25 +11,37 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
 	jailOp = ".tjob"
 )
 
+// libState
 const (
 	notInited = iota
 	startable
 	jailed
 )
 
+// jobState
+const (
+	started = iota
+	stopped
+)
+
 var (
 	ErrAlreadyInited        = errors.New("already inited")
 	ErrAlreadyStarted       = errors.New("already started")
-	ErrAlreadyJailed        = errors.New("already startable")
+	ErrNotStartable         = errors.New("not startable")
+	ErrNotStarted           = errors.New("not started")
+	ErrAlreadyJailed        = errors.New("already jailed")
 	ErrInvalidArgs          = errors.New("invalid args")
 	ErrForceStop            = errors.New("force stop")
-	procState         int32 = notInited
+	ErrReadAgain            = errors.New("read again")
+	libState          int32 = notInited
 )
 
 type (
@@ -75,10 +87,10 @@ type (
 		cgroup *os.File
 
 		// closed when done running
-		doneCh chan struct{}
+		doneCh chan bool
 
 		// started prevents the same process called twice
-		started int32
+		state int32
 
 		// jail path to isolate process
 		jailPath string
@@ -88,16 +100,19 @@ type (
 		status Status
 	}
 
+	Doner interface {
+		Done() bool
+	}
 	JobReader struct {
-		job     *Job
-		logs    io.ReadCloser
+		doner   Doner
+		logs    *os.File
 		inotify *os.File
 	}
 )
 
 func Init() error {
 	// MUST confirm Init() was called before starting any job
-	if !atomic.CompareAndSwapInt32(&procState, notInited, startable) {
+	if !atomic.CompareAndSwapInt32(&libState, notInited, startable) {
 		return ErrAlreadyInited
 	}
 
@@ -109,7 +124,7 @@ func Init() error {
 		return nil
 	}
 	// cannot start another job in the jailed state
-	if !atomic.CompareAndSwapInt32(&procState, startable, jailed) {
+	if !atomic.CompareAndSwapInt32(&libState, startable, jailed) {
 		return ErrAlreadyJailed
 	}
 	if err := mount(); err != nil {
@@ -141,12 +156,12 @@ func (s Status) Stopped() bool {
 
 // Start starts the command
 func (j *Job) Start(ctx context.Context) error {
-	// disallow starting another job already jailed
-	if procState == startable {
-		return ErrAlreadyJailed
+	// disallow starting another job unless safe
+	if libState != startable {
+		return ErrNotStartable
 	}
 	// prevent same proc starting this job twice
-	if !atomic.CompareAndSwapInt32(&j.started, 0, 1) {
+	if !atomic.CompareAndSwapInt32(&j.state, 0, started) {
 		return ErrAlreadyStarted
 	}
 
@@ -167,10 +182,10 @@ func (j *Job) Start(ctx context.Context) error {
 	j.rw.Lock()
 	j.status.StartedAt = time.Now()
 	if err := cmd.Start(); err != nil {
-		j.rw.Unlock()
 		logs.Close()
 		j.status.Error = err
 		j.status.StoppedAt = time.Now()
+		j.rw.Unlock()
 		return fmt.Errorf("start: %w", err)
 	}
 	j.logs = logs
@@ -186,7 +201,7 @@ func (j *Job) Start(ctx context.Context) error {
 func (j *Job) wait(cmd *exec.Cmd) {
 	defer close(j.doneCh)
 
-	s, err := cmd.Process.Wait()
+	err := cmd.Wait()
 	now := time.Now()
 
 	// Set final status
@@ -194,12 +209,12 @@ func (j *Job) wait(cmd *exec.Cmd) {
 	defer j.rw.Unlock()
 	j.status.Ran = now.Sub(j.status.StartedAt)
 	j.status.StoppedAt = now
-	j.status.Exit = int32(s.ExitCode())
+	if cmd.ProcessState != nil {
+		j.status.Exit = int32(cmd.ProcessState.ExitCode())
+	}
 
 	if err != nil {
 		err = errors.Join(j.status.Error, err)
-	} else if !s.Success() {
-		err = errors.Join(j.status.Error, &exec.ExitError{ProcessState: s})
 	}
 	j.status.Error = err
 
@@ -209,7 +224,10 @@ func (j *Job) wait(cmd *exec.Cmd) {
 	// close cgroup file
 	if j.cgroup != nil {
 		j.cgroup.Close()
+		// remove cgroup dir
+		_ = unix.Rmdir(j.cgroup.Name())
 	}
+	atomic.CompareAndSwapInt32(&j.state, started, stopped)
 }
 
 // Wait waits for the process to stop
@@ -244,7 +262,15 @@ func (j *Job) Status() Status {
 	return out
 }
 
+// Done returns true if the Job completed
+func (j *Job) Done() bool {
+	return j.state == stopped
+}
+
 // Logs returns JobReader for polling logs until process stops
 func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
-	return NewJobReader(ctx, j)
+	if j.logs == nil {
+		return nil, ErrNotStartable
+	}
+	return NewJobReader(ctx, j.logs.Name(), j)
 }

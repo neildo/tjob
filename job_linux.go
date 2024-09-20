@@ -2,17 +2,20 @@ package tjob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 const (
-	cgroupRoot     = "/sys/fs/cgroup/tjobs"
+	cgroupRoot     = "/sys/fs/cgroup"
 	cpuPeriod      = 100000
 	cgroupFileMode = 0o500
 )
@@ -29,7 +32,7 @@ func NewJob(path string, args ...string) *Job {
 		Path:     path,
 		Args:     args,
 		status:   s,
-		doneCh:   make(chan struct{}),
+		doneCh:   make(chan bool),
 	}
 }
 
@@ -41,11 +44,18 @@ func mount() error {
 // jail creates the namespaces required by the job to isolate exec.Cmd
 func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 	cgroupJob := fmt.Sprintf("%s/%s", cgroupRoot, j.Id)
+	cgroupJail := fmt.Sprintf("%s/jail", cgroupJob)
 
-	// create a directory structure like /sys/fs/cgroup/tjobs/<job_id>
-	if err := os.MkdirAll(cgroupJob, cgroupFileMode); err != nil {
+	// create a directory structure like /sys/fs/cgroup/<job_id>/jail
+	if err := os.MkdirAll(cgroupJail, cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", cgroupJob, err)
 	}
+	// remove dir if failed
+	defer func() {
+		if j.cgroup == nil {
+			_ = unix.Rmdir(cgroupJob)
+		}
+	}()
 
 	// enable cpu, io, and memory controllers
 	path := cgroupRoot + "/cgroup.subtree_control"
@@ -95,8 +105,8 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 }
 
 // NewJobReader returns the io.ReadCloser
-func NewJobReader(ctx context.Context, j *Job) (io.ReadCloser, error) {
-	l, err := os.OpenFile(j.logs.Name(), os.O_RDONLY, 0660)
+func NewJobReader(ctx context.Context, filename string, d Doner) (io.ReadCloser, error) {
+	l, err := os.OpenFile(filename, os.O_RDONLY, 0660)
 	if err != nil {
 		return nil, err
 	}
@@ -106,36 +116,36 @@ func NewJobReader(ctx context.Context, j *Job) (io.ReadCloser, error) {
 		defer l.Close()
 		return nil, os.NewSyscallError("inotify_init", err)
 	}
+	// watch for writes and close event
+	_, err = syscall.InotifyAddWatch(int(fd), l.Name(), syscall.IN_MODIFY|syscall.IN_CLOSE)
+	if err != nil {
+		return nil, os.NewSyscallError("inotify_add_watch", err)
+	}
 	// close file to unblock reads if context is done
 	file := os.NewFile(uintptr(fd), l.Name())
 	go func() {
 		<-ctx.Done()
 		file.Close()
 	}()
-	return &JobReader{job: j, logs: l, inotify: file}, nil
+	return &JobReader{doner: d, logs: l, inotify: file}, nil
 }
 
 // Read reads n bytes into buffer and return EOF only when Job stops
 func (r *JobReader) Read(buffer []byte) (n int, err error) {
 	n, err = r.logs.Read(buffer)
+
 	// wait and ignore EOF until stopped
-	if n == 0 && err == io.EOF && !r.job.Status().Stopped() {
+	if n == 0 && err == io.EOF && !r.doner.Done() {
 
-		if n == 0 {
-			// watch for writes and close event
-			wd, err := syscall.InotifyAddWatch(int(r.inotify.Fd()), r.job.logs.Name(), syscall.IN_MODIFY|syscall.IN_CLOSE)
-			if err != nil {
-				return 0, os.NewSyscallError("inotify_add_watch", err)
-			}
-			defer syscall.InotifyRmWatch(int(r.inotify.Fd()), uint32(wd))
+		// sufficiently size buffer for events
+		b := make([]byte, syscall.SizeofInotifyEvent*syscall.NAME_MAX+1)
 
-			// block until closed or write event
-			b := make([]byte, syscall.SizeofInotifyEvent*128)
-			if _, err = r.inotify.Read(b); err != nil {
-				return 0, err
-			}
+		// return EOF if file close by context
+		if n, err = r.inotify.Read(b); errors.Is(err, fs.ErrClosed) {
+			return 0, io.EOF
 		}
-		err = nil
+		// keep reading
+		err = ErrReadAgain
 	}
 	return
 }
