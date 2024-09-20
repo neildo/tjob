@@ -136,6 +136,11 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 	for n == 0 && err == nil {
 		n, err = r.logs.Read(buffer)
 
+		// return EOF if file close by context
+		if errors.Is(err, fs.ErrClosed) {
+			return n, io.EOF
+		}
+
 		// wait and ignore EOF until stopped
 		if n == 0 && err == io.EOF && !r.doner.Done() {
 
@@ -143,7 +148,7 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 			b := make([]byte, syscall.SizeofInotifyEvent*syscall.NAME_MAX+1)
 
 			// return EOF if file close by context
-			if _, e := r.inotify.Read(b); errors.Is(e, fs.ErrClosed) {
+			if _, err = r.inotify.Read(b); errors.Is(err, fs.ErrClosed) {
 				return 0, io.EOF
 			}
 			// clear EOF and try again
