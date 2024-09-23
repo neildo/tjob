@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/tls"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 
@@ -15,22 +14,22 @@ import (
 	"github.com/neildo/tjob/internal/service"
 )
 
-var (
-	mnt  = flag.String("mnt", "", "$MAJ:$MIN device number for mnt namespace")
-	cpu  = flag.Int("cpu", 20, "max cpu percentage")
-	mem  = flag.Int("mem", 20, "max memory in MB")
-	rbps = flag.Int("rbps", 20*1024*1024, "max reads in bytes/sec")
-	wbps = flag.Int("wbps", 20*1024*1024, "max writes in bytes/sec")
-	host = flag.String("host", "localhost:8080", "server url")
-	ca   = flag.String("ca", ".tjob/ca.crt", "CA cert file")
-	cert = flag.String("cert", ".tjob/svc.crt", "server cert file")
-	key  = flag.String("key", ".tjob/svc.key", "server key file")
-)
-
 func main() {
+	var (
+		mnt  = flag.String("mnt", "", "MAJ:MIN device number for mnt namespace")
+		cpu  = flag.Int("cpu", 20, "max cpu percentage")
+		mem  = flag.Int("mem", 20, "max memory in MB")
+		rbps = flag.Int("rbps", 20*1024*1024, "max reads in bytes/sec")
+		wbps = flag.Int("wbps", 20*1024*1024, "max writes in bytes/sec")
+		host = flag.String("host", "localhost:8080", "server url")
+		ca   = flag.String("ca", ".tjob/ca.crt", "CA cert file") //nolint:varnamelen
+		cert = flag.String("cert", ".tjob/svc.crt", "server cert file")
+		key  = flag.String("key", ".tjob/svc.key", "server key file")
+	)
+
 	// MUST init tjob before starting any job for isolation
 	if err := tjob.Init(); err != nil {
-		fmt.Println(err.Error())
+		log.Fatalln(err.Error())
 		return
 	}
 	flag.Parse()
@@ -46,7 +45,8 @@ func main() {
 		Certificates: certs,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    pool,
-		MinVersion:   tls.VersionTLS13})
+		MinVersion:   tls.VersionTLS13,
+	})
 
 	server := grpc.NewServer(
 		grpc.Creds(creds),
@@ -58,13 +58,13 @@ func main() {
 		ReadBPS:    *rbps,
 		WriteBPS:   *wbps,
 	})
-	l, err := net.Listen("tcp", *host)
+	listener, err := net.Listen("tcp", *host)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 	log.Printf("listen on %s\n", *host)
 
-	if err := server.Serve(l); err != nil {
+	if err := server.Serve(listener); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }

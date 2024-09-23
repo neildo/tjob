@@ -3,13 +3,16 @@ package proto
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 )
 
-func NewCertificates(certFile, keyFile, caFile string) ([]tls.Certificate, *x509.CertPool, error) {
+var ErrCertPool = errors.New("cert pool")
 
-	c, err := tls.LoadX509KeyPair(certFile, keyFile)
+// NewCertificates reads in cert, key and CA file
+func NewCertificates(certFile, keyFile, caFile string) ([]tls.Certificate, *x509.CertPool, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("server X509: %w", err)
 	}
@@ -19,8 +22,8 @@ func NewCertificates(certFile, keyFile, caFile string) ([]tls.Certificate, *x509
 	}
 	p := x509.NewCertPool()
 	if !p.AppendCertsFromPEM(data) {
-		return nil, nil, fmt.Errorf("CA cert pool")
+		return nil, nil, ErrCertPool
 	}
 
-	return []tls.Certificate{c}, p, nil
+	return []tls.Certificate{cert}, p, nil
 }

@@ -18,10 +18,9 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("not found")
-	ErrUnauthorized = errors.New("unauthorized")
-	ErrUnexpected   = errors.New("unexpected")
-
+	ErrNotFound           = errors.New("not found")
+	ErrUnauthorized       = errors.New("unauthorized")
+	ErrUnexpected         = errors.New("unexpected")
 	ErrNoPeer             = errors.New("no peer")
 	ErrNoTLSInfo          = errors.New("no TLS info")
 	ErrNoPeerCertificates = errors.New("no peer certificates")
@@ -31,6 +30,8 @@ type userJob struct {
 	user string
 	job  *tjob.Job
 }
+
+// JobServer is an implementation of the proto.JobServer interface.
 type JobServer struct {
 	proto.UnimplementedJobServer
 
@@ -52,13 +53,14 @@ type JobServer struct {
 	jobs sync.Map
 }
 
-func (s *JobServer) Run(c context.Context, r *proto.RunRequest) (*proto.RunResponse, error) {
+// Run starts a new job for originating user only
+func (s *JobServer) Run(c context.Context, req *proto.RunRequest) (*proto.RunResponse, error) {
 	user, err := s.userOf(c)
 	if err != nil {
 		return nil, fmt.Errorf("unauthorized: %w", err)
 	}
 
-	job := tjob.NewJob(r.Path, r.Args...)
+	job := tjob.NewJob(req.GetPath(), req.GetArgs()...)
 
 	// TODO: add to client request
 	job.Mnt = s.Mnt
@@ -69,52 +71,18 @@ func (s *JobServer) Run(c context.Context, r *proto.RunRequest) (*proto.RunRespo
 
 	// TODO: replace with better uuid shortener
 	id, _, _ := strings.Cut(job.Id, "-")
-	rr := &proto.RunResponse{JobId: id}
+	resp := &proto.RunResponse{JobId: id}
 	s.jobs.Store(id, &userJob{user: user, job: job})
 
-	if err := job.Start(context.Background()); err != nil {
-		return rr, fmt.Errorf("job start: %w", err)
+	if err := job.Start(context.Background()); err != nil { //nolint:contextcheck
+		return resp, fmt.Errorf("job start: %w", err)
 	}
-	return rr, nil
+	return resp, nil
 }
 
-func (s *JobServer) userOf(c context.Context) (string, error) {
-	peer, ok := peer.FromContext(c)
-	if !ok {
-		return "", ErrNoPeer
-	}
-	t, ok := peer.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return "", ErrNoTLSInfo
-	}
-	if len(t.State.PeerCertificates) == 0 {
-		return "", ErrNoPeerCertificates
-	}
-	// assume first peer certificate
-	return t.State.PeerCertificates[0].Subject.CommonName, nil
-}
-
-func (s *JobServer) jobOf(c context.Context, id string) (*userJob, error) {
-	user, err := s.userOf(c)
-	if err != nil {
-		return nil, err
-	}
-	v, ok := s.jobs.Load(id)
-	if !ok {
-		return nil, ErrUnexpected
-	}
-	u, ok := v.(*userJob)
-	if !ok {
-		return nil, ErrUnexpected
-	}
-	if u.user != user {
-		return nil, ErrUnauthorized
-	}
-	return u, nil
-}
-
-func (s *JobServer) Stop(c context.Context, r *proto.StopRequest) (*proto.StopResponse, error) {
-	j, err := s.jobOf(c, r.JobId)
+// Stop stops job for originating user only
+func (s *JobServer) Stop(c context.Context, req *proto.StopRequest) (*proto.StopResponse, error) {
+	j, err := s.jobOf(c, req.GetJobId())
 	if err != nil {
 		return nil, err
 	}
@@ -122,38 +90,40 @@ func (s *JobServer) Stop(c context.Context, r *proto.StopRequest) (*proto.StopRe
 	if err := j.job.Stop(); err != nil {
 		return nil, fmt.Errorf("job stop: %w", err)
 	}
-	return nil, nil
+	return &proto.StopResponse{}, nil
 }
 
-func (s *JobServer) Status(c context.Context, r *proto.StatusRequest) (*proto.StatusResponse, error) {
-	j, err := s.jobOf(c, r.JobId)
+// Status returns status of job for originating user only
+func (s *JobServer) Status(c context.Context, req *proto.StatusRequest) (*proto.StatusResponse, error) {
+	j, err := s.jobOf(c, req.GetJobId())
 	if err != nil {
 		return nil, err
 	}
-	ss := j.job.Status()
+	status := j.job.Status()
 	out := proto.Status{
-		JobId:     r.JobId,
-		Cmd:       ss.Cmd,
-		StartedAt: timestamppb.New(ss.StartedAt),
-		Ran:       durationpb.New(ss.Ran),
+		JobId:     req.GetJobId(),
+		Cmd:       status.Cmd,
+		StartedAt: timestamppb.New(status.StartedAt),
+		Ran:       durationpb.New(status.Ran),
 	}
-	if ss.Stopped() {
-		out.Exit = &ss.Exit
+	if status.Stopped() {
+		out.Exit = &status.Exit
 	}
-	if ss.Error != nil {
-		out.Error = ss.Error.Error()
+	if status.Error != nil {
+		out.Error = status.Error.Error()
 	}
 	return &proto.StatusResponse{Job: &out}, nil
 }
 
-func (s *JobServer) Logs(r *proto.LogsRequest, stream grpc.ServerStreamingServer[proto.LogsResponse]) error {
-	c := stream.Context()
-	j, err := s.jobOf(c, r.JobId)
+// Logs streams logs for running job or history of logs completed job for originating user only
+func (s *JobServer) Logs(req *proto.LogsRequest, stream grpc.ServerStreamingServer[proto.LogsResponse]) error {
+	ctx := stream.Context()
+	j, err := s.jobOf(ctx, req.GetJobId())
 	if err != nil {
 		return err
 	}
 
-	logs, _ := j.job.Logs(c)
+	logs, _ := j.job.Logs(ctx)
 	defer func() { logs.Close() }()
 
 	buffer := make([]byte, 1024)
@@ -170,10 +140,45 @@ func (s *JobServer) Logs(r *proto.LogsRequest, stream grpc.ServerStreamingServer
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				return fmt.Errorf("job read: %w", err)
+				return fmt.Errorf("log read: %w", err)
 			}
 			break
 		}
 	}
 	return nil
+}
+
+func (s *JobServer) userOf(c context.Context) (string, error) {
+	peer, ok := peer.FromContext(c)
+	if !ok {
+		return "", ErrNoPeer
+	}
+	info, ok := peer.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return "", ErrNoTLSInfo
+	}
+	if len(info.State.PeerCertificates) == 0 {
+		return "", ErrNoPeerCertificates
+	}
+	// assume first peer certificate
+	return info.State.PeerCertificates[0].Subject.CommonName, nil
+}
+
+func (s *JobServer) jobOf(c context.Context, id string) (*userJob, error) {
+	user, err := s.userOf(c)
+	if err != nil {
+		return nil, err
+	}
+	v, ok := s.jobs.Load(id)
+	if !ok {
+		return nil, ErrUnexpected
+	}
+	job, ok := v.(*userJob)
+	if !ok {
+		return nil, ErrUnexpected
+	}
+	if job.user != user {
+		return nil, ErrUnauthorized
+	}
+	return job, nil
 }
