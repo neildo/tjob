@@ -42,7 +42,7 @@ var (
 	ErrInvalidArgs          = errors.New("invalid args")
 	ErrForceStop            = errors.New("force stop")
 	ErrReadAgain            = errors.New("read again")
-	libState          int32 = notInited
+	libState          int32 = notInited //nolint:gochecknoglobals
 )
 
 type (
@@ -139,9 +139,10 @@ func Init() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return err
+		return fmt.Errorf("init: %w", err)
 	}
 	os.Exit(cmd.ProcessState.ExitCode())
+
 	return nil
 }
 
@@ -158,7 +159,7 @@ func (s Status) Stopped() bool {
 // Start starts the command
 func (j *Job) Start(ctx context.Context) error {
 	// disallow starting another job unless safe
-	if libState != startable {
+	if atomic.LoadInt32(&libState) != startable {
 		return ErrNotStartable
 	}
 	// prevent same proc starting this job twice
@@ -187,6 +188,7 @@ func (j *Job) Start(ctx context.Context) error {
 		j.status.Error = err
 		j.status.StoppedAt = time.Now()
 		j.rw.Unlock()
+
 		return fmt.Errorf("start: %w", err)
 	}
 	j.logs = logs
@@ -195,6 +197,7 @@ func (j *Job) Start(ctx context.Context) error {
 
 	// wait on separate coroutine
 	go j.wait(cmd)
+
 	return nil
 }
 
@@ -247,7 +250,10 @@ func (j *Job) Stop() error {
 	}
 	j.status.Error = ErrForceStop
 
-	return syscall.Kill(j.status.Pid, syscall.SIGTERM)
+	if err := syscall.Kill(j.status.Pid, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("stop: %w", err)
+	}
+	return nil
 }
 
 // Status returns the Status at any time and concurrency safe.
@@ -257,7 +263,7 @@ func (j *Job) Status() Status {
 
 	// calculate ran duration
 	if out.Ran == 0 {
-		out.Ran = time.Now().Sub(out.StartedAt)
+		out.Ran = time.Since(out.StartedAt)
 	}
 	j.rw.RUnlock()
 	return out
@@ -265,13 +271,13 @@ func (j *Job) Status() Status {
 
 // Done returns true if the Job completed
 func (j *Job) Done() bool {
-	return j.state == stopped
+	return atomic.LoadInt32(&j.state) == stopped
 }
 
 // Logs returns JobReader for polling logs until process stops
 func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
 	// no logs if never started
-	if j.state == created {
+	if atomic.LoadInt32(&j.state) == created {
 		return nil, ErrNotStarted
 	}
 	return NewJobReader(ctx, j.logs.Name(), j)

@@ -23,7 +23,11 @@ build: $(BUILD) certs
 	@ls -alh $(BUILD)
 
 test:
-	@go test -v ./... -count=1
+	@go test \
+		-race \
+		-shuffle on \
+		-count=1 \
+		-v ./... 
 
 lint:
 	golangci-lint run \

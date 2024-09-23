@@ -39,13 +39,17 @@ Status={Pid:30449 Cmd:find / -name *.txt StartedAt:2024-09-23 12:19:16.920139364
 exit status 2}
 
 # run go tests
-$ go test -v .
+$ go test -v . -count=1
 === RUN   TestJobReader
---- PASS: TestJobReader (1.02s)
+=== PAUSE TestJobReader
 === RUN   TestJobReaderCancelled
---- PASS: TestJobReaderCancelled (1.00s)
+=== PAUSE TestJobReaderCancelled
+=== CONT  TestJobReader
+=== CONT  TestJobReaderCancelled
+--- PASS: TestJobReader (1.01s)
+--- PASS: TestJobReaderCancelled (1.01s)
 PASS
-ok  	github.com/neildo/tjob	2.028s
+ok  	github.com/neildo/tjob	1.021s
 ```
 [See example code for more.](./examples/demo/main.go) 
 

@@ -23,7 +23,7 @@ const (
 
 // NewJob creates Job for the given command path and args until Start()
 func NewJob(path string, args ...string) *Job {
-	s := Status{
+	status := Status{
 		Cmd: strings.Join(append([]string{path}, args...), " "),
 	}
 	return &Job{
@@ -31,14 +31,17 @@ func NewJob(path string, args ...string) *Job {
 		jailPath: "/proc/self/exe",
 		Path:     path,
 		Args:     args,
-		status:   s,
+		status:   status,
 		doneCh:   make(chan bool),
 	}
 }
 
 func mount() error {
 	// MUST override the parent /proc before running command. linux unmount upon exit
-	return syscall.Mount("proc", "/proc", "proc", 0, "")
+	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
+		return fmt.Errorf("mount: %w", err)
+	}
+	return nil
 }
 
 // jail creates the namespaces required by the job to isolate exec.Cmd
@@ -106,20 +109,20 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 
 // NewJobReader returns the io.ReadCloser
 func NewJobReader(ctx context.Context, filename string, d Doner) (io.ReadCloser, error) {
-	l, err := os.OpenFile(filename, os.O_RDONLY, 0660)
+	l, err := os.OpenFile(filename, os.O_RDONLY, 0o660)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
 	// reader specific notify
 	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
 	if err != nil {
 		defer l.Close()
-		return nil, os.NewSyscallError("inotify_init", err)
+		return nil, fmt.Errorf("inotify_init1: %w", err)
 	}
 	// watch for writes and close event
 	_, err = syscall.InotifyAddWatch(int(fd), l.Name(), syscall.IN_MODIFY|syscall.IN_CLOSE)
 	if err != nil {
-		return nil, os.NewSyscallError("inotify_add_watch", err)
+		return nil, fmt.Errorf("inotify_add_watch: %w", err)
 	}
 	// close file to unblock reads if context is done
 	file := os.NewFile(uintptr(fd), l.Name())
@@ -132,7 +135,11 @@ func NewJobReader(ctx context.Context, filename string, d Doner) (io.ReadCloser,
 }
 
 // Read reads n bytes into buffer and return EOF only when Job stops
-func (r *JobReader) Read(buffer []byte) (n int, err error) {
+func (r *JobReader) Read(buffer []byte) (int, error) {
+	var (
+		n   int
+		err error
+	)
 	for n == 0 && err == nil {
 		n, err = r.logs.Read(buffer)
 
@@ -143,7 +150,6 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 
 		// wait and ignore EOF until stopped
 		if n == 0 && err == io.EOF && !r.doner.Done() {
-
 			// sufficiently size buffer for events
 			b := make([]byte, syscall.SizeofInotifyEvent*syscall.NAME_MAX+1)
 
@@ -155,10 +161,13 @@ func (r *JobReader) Read(buffer []byte) (n int, err error) {
 			err = nil
 		}
 	}
-	return
+	return n, err
 }
 
 func (r *JobReader) Close() error {
-	r.inotify.Close()
-	return r.logs.Close()
+	_ = r.inotify.Close()
+	if err := r.logs.Close(); err != nil {
+		return fmt.Errorf("reader close: %w", err)
+	}
+	return nil
 }
