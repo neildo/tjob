@@ -45,9 +45,9 @@ func mount() error {
 }
 
 // jail creates the namespaces required by the job to isolate exec.Cmd
-func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
-	cgroupJob := fmt.Sprintf("%s/%s", cgroupRoot, j.Id)
-	cgroupJail := fmt.Sprintf("%s/jail", cgroupJob)
+func jail(ctx context.Context, job *Job) (*exec.Cmd, error) {
+	cgroupJob := fmt.Sprintf("%s/%s", cgroupRoot, job.Id)
+	cgroupJail := fmt.Sprintf("%s/jail", cgroupJob) //nolint:perfsprint
 
 	// create a directory structure like /sys/fs/cgroup/<job_id>/jail
 	if err := os.MkdirAll(cgroupJail, cgroupFileMode); err != nil {
@@ -55,7 +55,7 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 	}
 	// remove dir if failed
 	defer func() {
-		if j.cgroup == nil {
+		if job.cgroup == nil {
 			_ = unix.Rmdir(cgroupJob)
 		}
 	}()
@@ -66,8 +66,8 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// limit cpu
-	if j.CPUPercent > 0 {
-		n := float32(j.CPUPercent) / 100 * cpuPeriod
+	if job.CPUPercent > 0 {
+		n := float32(job.CPUPercent) / 100 * cpuPeriod
 		content := fmt.Sprintf("%d %d", int(n), cpuPeriod)
 		path = cgroupJob + "/cpu.max"
 		if err := os.WriteFile(path, []byte(content), cgroupFileMode); err != nil {
@@ -77,12 +77,12 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 
 	// limit memory
 	path = cgroupJob + "/memory.max"
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%dM", j.MemoryMB)), cgroupFileMode); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%dM", job.MemoryMB)), cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
 	// limit rbps and wbps
-	content := fmt.Sprintf("%s rbps=%d wbps=%d riops=max wiops=max", j.Mnt, j.ReadBPS, j.WriteBPS)
+	content := fmt.Sprintf("%s rbps=%d wbps=%d riops=max wiops=max", job.Mnt, job.ReadBPS, job.WriteBPS)
 	path = cgroupJob + "/io.max"
 	if err := os.WriteFile(path, []byte(content), cgroupFileMode); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -94,52 +94,48 @@ func jail(ctx context.Context, j *Job) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("%s: %w", cgroupJob, err)
 	}
 
-	args := append([]string{jailOp, j.Path}, j.Args...)
-	cmd := exec.CommandContext(ctx, j.jailPath, args...)
+	args := append([]string{jailOp, job.Path}, job.Args...)
+	cmd := exec.CommandContext(ctx, job.jailPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
 		Unshareflags: syscall.CLONE_NEWNS,
 		CgroupFD:     int(cgroup.Fd()),
 		UseCgroupFD:  true,
 	}
-	j.cgroup = cgroup
+	job.cgroup = cgroup
 
 	return cmd, nil
 }
 
 // NewJobReader returns the io.ReadCloser
-func NewJobReader(ctx context.Context, filename string, d Doner) (io.ReadCloser, error) {
-	l, err := os.OpenFile(filename, os.O_RDONLY, 0o660)
+func NewJobReader(ctx context.Context, filename string, doner Doner) (io.ReadCloser, error) {
+	log, err := os.OpenFile(filename, os.O_RDONLY, 0o660)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
 	// reader specific notify
-	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
+	desc, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
 	if err != nil {
-		defer l.Close()
+		defer log.Close()
 		return nil, fmt.Errorf("inotify_init1: %w", err)
 	}
 	// watch for writes and close event
-	_, err = syscall.InotifyAddWatch(int(fd), l.Name(), syscall.IN_MODIFY|syscall.IN_CLOSE)
+	_, err = syscall.InotifyAddWatch(desc, log.Name(), syscall.IN_MODIFY|syscall.IN_CLOSE)
 	if err != nil {
 		return nil, fmt.Errorf("inotify_add_watch: %w", err)
 	}
 	// close file to unblock reads if context is done
-	file := os.NewFile(uintptr(fd), l.Name())
+	file := os.NewFile(uintptr(desc), log.Name())
 	go func() {
 		<-ctx.Done()
 		file.Close()
-		l.Close()
+		log.Close()
 	}()
-	return &JobReader{doner: d, logs: l, inotify: file}, nil
+	return &JobReader{doner: doner, logs: log, inotify: file}, nil
 }
 
 // Read reads n bytes into buffer and return EOF only when Job stops
-func (r *JobReader) Read(buffer []byte) (int, error) {
-	var (
-		n   int
-		err error
-	)
+func (r *JobReader) Read(buffer []byte) (n int, err error) { //nolint:nonamedreturns
 	for n == 0 && err == nil {
 		n, err = r.logs.Read(buffer)
 
@@ -161,7 +157,7 @@ func (r *JobReader) Read(buffer []byte) (int, error) {
 			err = nil
 		}
 	}
-	return n, err
+	return
 }
 
 func (r *JobReader) Close() error {

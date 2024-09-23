@@ -58,7 +58,7 @@ type (
 
 	Job struct {
 		// Unique Job Id
-		Id string
+		Id string //nolint:revive
 
 		// Set underlying os/exec.Cmd.Path
 		Path string
