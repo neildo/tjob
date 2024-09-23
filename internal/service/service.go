@@ -132,8 +132,9 @@ func (s *JobServer) Logs(req *proto.LogsRequest, stream grpc.ServerStreamingServ
 		n, err := logs.Read(buffer)
 		if n > 0 {
 			out := &proto.LogsResponse{
-				Out: buffer[:n],
+				Out: make([]byte, n),
 			}
+			copy(out.Out, buffer[:n])
 			if err = stream.Send(out); err != nil {
 				return fmt.Errorf("stream send: %w", err)
 			}
