@@ -39,17 +39,18 @@ Status={Pid:30449 Cmd:find / -name *.txt StartedAt:2024-09-23 12:19:16.920139364
 exit status 2}
 
 # run go tests
-$ go test -v . -count=1
-=== RUN   TestJobReader
-=== PAUSE TestJobReader
+$ go test -race -shuffle on -count=1 -v .
+-test.shuffle 1727099302765219893
 === RUN   TestJobReaderCancelled
 === PAUSE TestJobReaderCancelled
+=== RUN   TestJobReader
+=== PAUSE TestJobReader
 === CONT  TestJobReader
 === CONT  TestJobReaderCancelled
---- PASS: TestJobReader (1.01s)
 --- PASS: TestJobReaderCancelled (1.01s)
+--- PASS: TestJobReader (1.01s)
 PASS
-ok  	github.com/neildo/tjob	1.021s
+ok  	github.com/neildo/tjob	2.023s
 ```
 [See example code for more.](./examples/demo/main.go) 
 
