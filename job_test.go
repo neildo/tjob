@@ -3,6 +3,7 @@ package tjob_test
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,14 +12,20 @@ import (
 
 type JobMock struct {
 	tjob.Doner
-	done bool
+	done int32
 }
 
 func (m *JobMock) Done() bool {
-	return m.done
+	return atomic.LoadInt32(&m.done) == 1
+}
+
+func (m *JobMock) SetDone() bool {
+	return atomic.CompareAndSwapInt32(&m.done, 0, 1)
 }
 
 func TestJobReader(t *testing.T) {
+	t.Parallel()
+
 	tmp, err := os.CreateTemp(t.TempDir(), "*")
 	if err != nil {
 		t.Fatalf("unexpected tmp file: %v", err)
@@ -28,14 +35,15 @@ func TestJobReader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancel()
 
-	m := JobMock{}
+	job := JobMock{}
 	go func() {
-		tmp.Write([]byte("Hello"))
+		_, _ = tmp.WriteString("Hello")
 		<-time.After(time.Second)
-		tmp.Write([]byte("World"))
-		m.done = true
+		_, _ = tmp.WriteString("World")
+
+		_ = job.SetDone()
 	}()
-	sut, err := tjob.NewJobReader(ctx, tmp.Name(), &m)
+	sut, err := tjob.NewJobReader(ctx, tmp.Name(), &job)
 	defer func() { sut.Close() }()
 
 	if err != nil {
@@ -58,6 +66,8 @@ func TestJobReader(t *testing.T) {
 }
 
 func TestJobReaderCancelled(t *testing.T) {
+	t.Parallel()
+
 	tmp, err := os.CreateTemp(t.TempDir(), "*")
 	if err != nil {
 		t.Fatalf("unexpected tmp file: %v", err)
@@ -65,16 +75,15 @@ func TestJobReaderCancelled(t *testing.T) {
 	defer func() { tmp.Close() }()
 
 	// mock job write to file and never finishes
-	m := JobMock{}
-	tmp.Write([]byte("Hello"))
+	_, _ = tmp.WriteString("Hello")
 	go func() {
 		<-time.After(10 * time.Second)
-		tmp.Write([]byte("World"))
+		_, _ = tmp.WriteString("World")
 	}()
 
 	// user request logs
 	ctx, cancel := context.WithCancel(context.TODO())
-	sut, err := tjob.NewJobReader(ctx, tmp.Name(), &m)
+	sut, err := tjob.NewJobReader(ctx, tmp.Name(), &JobMock{})
 	defer func() { sut.Close() }()
 
 	if err != nil {

@@ -33,11 +33,22 @@ $ sudo go run examples/demo/main.go -mnt 253:0 find / -name *.txt
 /var/lib/cloud/instances/iid-datasource-none/user-data.txt
 /var/lib/cloud/instances/iid-datasource-none/vendor-data2.txt
 ...
-/snap/lxd/24326/lib/python3/dist-packages/urllib3-1.25.8.egg-info/requires.txt
-/snap/lxd/24326/lib/python3/dist-packages/urllib3-1.25.8.egg-info/top_level.txt
-/vagrant/souveinotify_add_watch: bad file descriptor
-{Pid:13124 Cmd:find StartedAt:2024-09-19 21:09:14.404011812 +0000 UTC m=+0.000610550 StoppedAt:2024-09-19 21:09:17.420254423 +0000 UTC m=+3.016853161 Ran:3.016242611s Exit:-1 Error:force stop
-signal: killed}
-$ 
+/snap/lxd/29353/lib/python3/dist-packages/certifi-2019.11.28.egg-info/dependency_links.txt
+/snap/lxd/29353/lib/python3/dist-packages/certifiJobId=055c6508-d43e-4e48-b903-5b68b170f130
+Status={Pid:30449 Cmd:find / -name *.txt StartedAt:2024-09-23 12:19:16.920139364 +0000 UTC m=+0.003127958 StoppedAt:2024-09-23 12:19:18.946252189 +0000 UTC m=+2.029240783 Ran:2.026112825s Exit:2 Error:force stop
+exit status 2}
+
+# run go tests
+$ go test -v . -count=1
+=== RUN   TestJobReader
+=== PAUSE TestJobReader
+=== RUN   TestJobReaderCancelled
+=== PAUSE TestJobReaderCancelled
+=== CONT  TestJobReader
+=== CONT  TestJobReaderCancelled
+--- PASS: TestJobReader (1.01s)
+--- PASS: TestJobReaderCancelled (1.01s)
+PASS
+ok  	github.com/neildo/tjob	1.021s
 ```
 [See example code for more.](./examples/demo/main.go) 
