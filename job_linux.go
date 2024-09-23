@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/google/uuid"
@@ -23,8 +24,7 @@ const (
 // NewJob creates Job for the given command path and args until Start()
 func NewJob(path string, args ...string) *Job {
 	s := Status{
-		Cmd:  path,
-		Exit: -1,
+		Cmd: strings.Join(append([]string{path}, args...), " "),
 	}
 	return &Job{
 		Id:       uuid.New().String(),

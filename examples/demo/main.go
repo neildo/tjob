@@ -19,7 +19,7 @@ var (
 	mem  = 10
 	rbps = 1024
 	wbps = 1024
-	wait = 120
+	wait = 2
 )
 
 func main() {
@@ -68,7 +68,10 @@ func main() {
 		defer cancel()
 
 		buffer := make([]byte, 1024)
-		logs, _ := job.Logs(ctx)
+		logs, err := job.Logs(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
 		defer func() { logs.Close() }()
 
 		// poll for logs from job

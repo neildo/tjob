@@ -28,7 +28,8 @@ const (
 
 // jobState
 const (
-	started = iota
+	created = iota
+	started
 	stopped
 )
 
@@ -116,7 +117,7 @@ func Init() error {
 		return ErrAlreadyInited
 	}
 
-	if len(os.Args) < 3 && os.Args[1] == jailOp {
+	if len(os.Args) == 2 && os.Args[1] == jailOp {
 		return ErrInvalidArgs
 	}
 	// skip run command in jail
@@ -140,8 +141,8 @@ func Init() error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	// return error to force early exit by caller
-	return fmt.Errorf(cmd.ProcessState.String())
+	os.Exit(cmd.ProcessState.ExitCode())
+	return nil
 }
 
 // Started return true if StartedAt is not zero
@@ -246,7 +247,7 @@ func (j *Job) Stop() error {
 	}
 	j.status.Error = ErrForceStop
 
-	return syscall.Kill(j.status.Pid, syscall.SIGKILL)
+	return syscall.Kill(j.status.Pid, syscall.SIGTERM)
 }
 
 // Status returns the Status at any time and concurrency safe.
@@ -270,7 +271,7 @@ func (j *Job) Done() bool {
 // Logs returns JobReader for polling logs until process stops
 func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
 	// no logs if never started
-	if j.state == 0 {
+	if j.state == created {
 		return nil, ErrNotStarted
 	}
 	return NewJobReader(ctx, j.logs.Name(), j)

@@ -162,7 +162,7 @@ Show status of `JOB`
 ```bash
 $ tjob ps 1fcc4f8b
 JOB ID    COMMAND        CREATED     STATUS
-1fcc4f8b  "echo hello"   1 min ago   Exited (0) 1 min ago
+1fcc4f8b  "echo hello"   1 min ago   Exited (0)
 ```
 ---
 
