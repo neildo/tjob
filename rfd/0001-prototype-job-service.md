@@ -98,7 +98,7 @@ Server for `tjob` CLI with limits per job
 ```
 
 ```
-tjob run [OPTIONS] [COMMAND] [ARG...]
+tjob run [OPTIONS] COMMAND [ARG...]
 ```
 #### Description
 Runs `COMMAND` in isolation from host

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+option go_package = "github.com/neildo/tjob/internal/proto";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+service Job {
+  rpc Run(RunRequest) returns (RunResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Logs(LogsRequest) returns (stream LogsResponse);
+}
+
+message RunRequest {
+  string path = 1; // path of process
+
+  repeated string args = 2; // additional arguments
+}
+
+message RunResponse {
+  string job_id = 1;
+}
+
+message StopRequest {
+  string job_id = 1;
+}
+
+message StopResponse {
+}
+
+message Status {
+  string job_id = 1;
+   
+  string cmd = 2; // full command line
+
+  google.protobuf.Timestamp started_at = 3; // job start time in UTC
+   
+  google.protobuf.Duration ran = 4; // duration since start
+   
+  optional int32 exit = 5; // exit code from job
+
+  string error = 6; // any error from the job
+}
+
+message StatusRequest {
+  string job_id = 1;
+}
+
+message StatusResponse {
+   Status job = 1;
+}
+
+message LogsRequest {
+   string job_id = 1;
+}
+
+message LogsResponse {
+   bytes out = 1;
+}
