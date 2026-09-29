@@ -11,19 +11,21 @@ import (
 	"github.com/neildo/tjob"
 	"github.com/neildo/tjob/internal/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
-	ErrNotFound           = errors.New("not found")
-	ErrUnauthorized       = errors.New("unauthorized")
-	ErrUnexpected         = errors.New("unexpected")
-	ErrNoPeer             = errors.New("no peer")
-	ErrNoTLSInfo          = errors.New("no TLS info")
-	ErrNoPeerCertificates = errors.New("no peer certificates")
+	// ErrNotFound is returned both for missing jobs and jobs owned by another
+	// user, so callers cannot probe which job IDs exist.
+	ErrNotFound           = status.Error(codes.NotFound, "job not found")
+	ErrNoPeer             = status.Error(codes.Unauthenticated, "no peer")
+	ErrNoTLSInfo          = status.Error(codes.Unauthenticated, "no TLS info")
+	ErrNoPeerCertificates = status.Error(codes.Unauthenticated, "no peer certificates")
 )
 
 type userJob struct {
@@ -57,7 +59,7 @@ type JobServer struct {
 func (s *JobServer) Run(c context.Context, req *proto.RunRequest) (*proto.RunResponse, error) {
 	user, err := s.userOf(c)
 	if err != nil {
-		return nil, fmt.Errorf("unauthorized: %w", err)
+		return nil, err
 	}
 
 	job := tjob.NewJob(req.GetPath(), req.GetArgs()...)
@@ -71,13 +73,12 @@ func (s *JobServer) Run(c context.Context, req *proto.RunRequest) (*proto.RunRes
 
 	// TODO: replace with better uuid shortener
 	id, _, _ := strings.Cut(job.Id, "-")
-	resp := &proto.RunResponse{JobId: id}
-	s.jobs.Store(id, &userJob{user: user, job: job})
-
 	if err := job.Start(context.Background()); err != nil { //nolint:contextcheck
-		return resp, fmt.Errorf("job start: %w", err)
+		return nil, status.Errorf(codes.Internal, "job start: %v", err)
 	}
-	return resp, nil
+	// only publish jobs that started, so no handler sees a half-started job
+	s.jobs.Store(id, &userJob{user: user, job: job})
+	return &proto.RunResponse{JobId: id}, nil
 }
 
 // Stop stops job for originating user only
@@ -88,7 +89,10 @@ func (s *JobServer) Stop(c context.Context, req *proto.StopRequest) (*proto.Stop
 	}
 
 	if err := j.job.Stop(); err != nil {
-		return nil, fmt.Errorf("job stop: %w", err)
+		if errors.Is(err, tjob.ErrNotStarted) {
+			return nil, status.Errorf(codes.FailedPrecondition, "job stop: %v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "job stop: %v", err)
 	}
 	return &proto.StopResponse{}, nil
 }
@@ -99,18 +103,18 @@ func (s *JobServer) Status(c context.Context, req *proto.StatusRequest) (*proto.
 	if err != nil {
 		return nil, err
 	}
-	status := j.job.Status()
+	st := j.job.Status()
 	out := proto.Status{
 		JobId:     req.GetJobId(),
-		Cmd:       status.Cmd,
-		StartedAt: timestamppb.New(status.StartedAt),
-		Ran:       durationpb.New(status.Ran),
+		Cmd:       st.Cmd,
+		StartedAt: timestamppb.New(st.StartedAt),
+		Ran:       durationpb.New(st.Ran),
 	}
-	if status.Stopped() {
-		out.Exit = &status.Exit
+	if st.Stopped() {
+		out.Exit = &st.Exit
 	}
-	if status.Error != nil {
-		out.Error = status.Error.Error()
+	if st.Error != nil {
+		out.Error = st.Error.Error()
 	}
 	return &proto.StatusResponse{Job: &out}, nil
 }
@@ -123,8 +127,11 @@ func (s *JobServer) Logs(req *proto.LogsRequest, stream grpc.ServerStreamingServ
 		return err
 	}
 
-	logs, _ := j.job.Logs(ctx)
-	defer func() { logs.Close() }()
+	logs, err := j.job.Logs(ctx)
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "job logs: %v", err)
+	}
+	defer logs.Close()
 
 	buffer := make([]byte, 1024)
 	// poll logs to send back
@@ -135,13 +142,13 @@ func (s *JobServer) Logs(req *proto.LogsRequest, stream grpc.ServerStreamingServ
 				Out: make([]byte, n),
 			}
 			copy(out.Out, buffer[:n])
-			if err = stream.Send(out); err != nil {
+			if err := stream.Send(out); err != nil {
 				return fmt.Errorf("stream send: %w", err)
 			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				return fmt.Errorf("log read: %w", err)
+				return status.Errorf(codes.Internal, "log read: %v", err)
 			}
 			break
 		}
@@ -172,14 +179,11 @@ func (s *JobServer) jobOf(c context.Context, id string) (*userJob, error) {
 	}
 	v, ok := s.jobs.Load(id)
 	if !ok {
-		return nil, ErrUnexpected
+		return nil, ErrNotFound
 	}
 	job, ok := v.(*userJob)
-	if !ok {
-		return nil, ErrUnexpected
-	}
-	if job.user != user {
-		return nil, ErrUnauthorized
+	if !ok || job.user != user {
+		return nil, ErrNotFound
 	}
 	return job, nil
 }

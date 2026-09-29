@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,22 +47,18 @@ func main() {
 		cert = flag.String("cert", ".tjob/cli.crt", "cli cert file")
 		key  = flag.String("key", ".tjob/cli.key", "cli key file")
 	)
-	args := os.Args
-	cmd := ""
-	if len(args) > 1 && strings.Contains(subcommands, os.Args[1]) {
-		cmd = args[1]
-		args = args[2:]
-		if strings.HasPrefix(args[0], "-") {
-			_ = flag.CommandLine.Parse(args)
-		}
-		// skip over any flags
-		for len(args) > 0 && strings.HasPrefix(args[0], "-") {
-			args = args[2:]
-		}
-	}
-	if len(args) == 0 || cmd == "" {
+	// COMMAND [OPTIONS] ARGS...: flag parsing stops at the first non-flag,
+	// so the job's own flags (for example `run ls -la`) are left in Args.
+	if len(os.Args) < 2 || !slices.Contains(strings.Fields(subcommands), os.Args[1]) {
 		usage()
-		return
+		os.Exit(2)
+	}
+	cmd := os.Args[1]
+	_ = flag.CommandLine.Parse(os.Args[2:]) // ExitOnError: exits on bad flags
+	args := flag.Args()
+	if len(args) == 0 {
+		usage()
+		os.Exit(2)
 	}
 
 	certs, pool, err := proto.NewCertificates(*cert, *key, *ca)

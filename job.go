@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -88,7 +86,7 @@ type (
 		cgroup *os.File
 
 		// closed when done running
-		doneCh chan bool
+		doneCh chan struct{}
 
 		// started prevents the same process called twice
 		state int32
@@ -101,6 +99,9 @@ type (
 		status Status
 	}
 
+	// Doner reports whether the writer of a log file has finished. Done must
+	// return true before the writer's final close of the file, because a
+	// JobReader waiting at EOF relies on that close event to wake up and see it.
 	Doner interface {
 		Done() bool
 	}
@@ -108,6 +109,12 @@ type (
 		doner   Doner
 		logs    *os.File
 		inotify *os.File
+		events  []byte
+
+		// closed stops the context watcher when the reader is closed first
+		closed    chan struct{}
+		closeOnce sync.Once
+		closeErr  error
 	}
 )
 
@@ -138,10 +145,22 @@ func Init() error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+
+	// Propagate the child's exit status as our own so the parent reports it.
+	// A non-zero exit is not an error of the jail and must not be logged into
+	// the job's output.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			os.Exit(128 + int(ws.Signal()))
+		}
+		os.Exit(exitErr.ExitCode())
+	}
+	if err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
-	os.Exit(cmd.ProcessState.ExitCode())
+	os.Exit(0)
 
 	return nil
 }
@@ -163,39 +182,54 @@ func (j *Job) Start(ctx context.Context) error {
 		return ErrNotStartable
 	}
 	// prevent same proc starting this job twice
-	if !atomic.CompareAndSwapInt32(&j.state, 0, started) {
+	if !atomic.CompareAndSwapInt32(&j.state, created, started) {
 		return ErrAlreadyStarted
 	}
 
+	// Hold the lock for the whole start so Status, Stop and Logs never observe
+	// a half-started job. Everything below is local and bounded; no network.
+	j.rw.Lock()
+	defer j.rw.Unlock()
+
+	j.status.StartedAt = time.Now()
+	if err := j.start(ctx); err != nil {
+		// A failed start is a finished job: record why, release Wait and
+		// make Stop and Logs return ErrNotStarted.
+		j.status.Error = err
+		j.status.StoppedAt = time.Now()
+		j.status.Ran = j.status.StoppedAt.Sub(j.status.StartedAt)
+		atomic.StoreInt32(&j.state, stopped)
+		close(j.doneCh)
+
+		return err
+	}
+	return nil
+}
+
+// start runs the command and must be called with j.rw held.
+func (j *Job) start(ctx context.Context) error {
 	// jail the arbitrary process with required isolation
-	cmd, err := jail(ctx, j)
+	cmd, cgroup, err := jail(ctx, j)
 	if err != nil {
 		return fmt.Errorf("jail: %w", err)
 	}
 	// write stdout and stderr to log file
-	logs, err := os.CreateTemp("", "*")
+	logs, err := os.CreateTemp("", "tjob-*.log")
 	if err != nil {
-		return fmt.Errorf("log file: %w", err)
+		return errors.Join(fmt.Errorf("log file: %w", err), removeCgroup(cgroup))
 	}
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 
-	// start command
-	j.rw.Lock()
-	j.status.StartedAt = time.Now()
 	if err := cmd.Start(); err != nil {
 		logs.Close()
-		j.status.Error = err
-		j.status.StoppedAt = time.Now()
-		j.rw.Unlock()
-
-		return fmt.Errorf("start: %w", err)
+		return errors.Join(fmt.Errorf("start: %w", err), removeCgroup(cgroup))
 	}
+	j.cgroup = cgroup
 	j.logs = logs
 	j.status.Pid = cmd.Process.Pid
-	j.rw.Unlock()
 
-	// wait on separate coroutine
+	// wait on separate goroutine; it blocks on j.rw until Start returns
 	go j.wait(cmd)
 
 	return nil
@@ -203,56 +237,62 @@ func (j *Job) Start(ctx context.Context) error {
 
 // wait waits for the process to stop
 func (j *Job) wait(cmd *exec.Cmd) {
-	defer close(j.doneCh)
-
 	err := cmd.Wait()
 	now := time.Now()
 
 	// Set final status
 	j.rw.Lock()
-	defer j.rw.Unlock()
 	j.status.Ran = now.Sub(j.status.StartedAt)
 	j.status.StoppedAt = now
 	if cmd.ProcessState != nil {
 		j.status.Exit = int32(cmd.ProcessState.ExitCode())
 	}
-
 	if err != nil {
 		err = errors.Join(j.status.Error, err)
+	} else {
+		err = j.status.Error
 	}
-	j.status.Error = err
+	j.status.Error = errors.Join(err, removeCgroup(j.cgroup))
+	j.rw.Unlock()
 
-	// close log file
+	// Order matters: mark stopped before the final close of the log file.
+	// A reader at EOF that saw Done() == false is blocked on inotify and is
+	// woken by this close; it must then see Done() == true. See Doner.
+	atomic.StoreInt32(&j.state, stopped)
 	j.logs.Close()
-
-	// close cgroup file
-	if j.cgroup != nil {
-		j.cgroup.Close()
-		// remove cgroup dir
-		_ = unix.Rmdir(j.cgroup.Name())
-	}
-	atomic.CompareAndSwapInt32(&j.state, started, stopped)
+	close(j.doneCh)
 }
 
 // Wait waits for the process to stop
 func (j *Job) Wait() error {
 	<-j.doneCh
+
+	j.rw.RLock()
+	defer j.rw.RUnlock()
 	return j.status.Error
 }
 
-// Stop signal SIGKILL on the process group and idempotent.
+// Stop sends SIGKILL to the jail, which is PID 1 of the job's PID namespace,
+// so the kernel also kills every descendant. Stop is idempotent.
 func (j *Job) Stop() error {
 	j.rw.Lock()
 	defer j.rw.Unlock()
 
+	// Pid 0 would signal our own process group; never send it.
+	if j.status.Pid == 0 {
+		return ErrNotStarted
+	}
 	if j.status.Stopped() {
 		return nil
 	}
-	j.status.Error = ErrForceStop
-
-	if err := syscall.Kill(j.status.Pid, syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(j.status.Pid, syscall.SIGKILL); err != nil {
+		// ESRCH: exited but not yet reaped by wait; nothing left to stop.
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("stop: %w", err)
 	}
+	j.status.Error = ErrForceStop
 	return nil
 }
 
@@ -261,8 +301,8 @@ func (j *Job) Status() Status {
 	j.rw.RLock()
 	out := j.status
 
-	// calculate ran duration
-	if out.Ran == 0 {
+	// calculate ran duration while running
+	if out.Started() && !out.Stopped() {
 		out.Ran = time.Since(out.StartedAt)
 	}
 	j.rw.RUnlock()
@@ -274,11 +314,15 @@ func (j *Job) Done() bool {
 	return atomic.LoadInt32(&j.state) == stopped
 }
 
-// Logs returns JobReader for polling logs until process stops
+// Logs returns a JobReader that streams logs from the start until the job stops
 func (j *Job) Logs(ctx context.Context) (io.ReadCloser, error) {
-	// no logs if never started
-	if atomic.LoadInt32(&j.state) == created {
+	j.rw.RLock()
+	logs := j.logs
+	j.rw.RUnlock()
+
+	// no logs if never started or failed to start
+	if logs == nil {
 		return nil, ErrNotStarted
 	}
-	return NewJobReader(ctx, j.logs.Name(), j)
+	return NewJobReader(ctx, logs.Name(), j)
 }
