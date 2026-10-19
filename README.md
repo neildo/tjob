@@ -4,6 +4,26 @@
 
 [See RFD for more.](./rfd/0001-prototype-job-service.md) 
 
+## Why it fits Coder
+
+tjob runs untrusted processes on a shared Linux host and keeps each one inside a boundary. That is the same problem as letting a coding agent run commands in a workspace: decide who may run what, cap what it can use, and keep a record of what it did.
+
+- **Isolation**: each job gets its own PID, mount, and network namespace, so it cannot see other processes or reach the network.
+- **Limits**: each job gets its own cgroup v2 leaf with CPU, memory, and disk IO caps.
+- **Identity and authz**: the gRPC API uses mTLS only. The client cert's CN is the user, and a user can only see and control their own jobs.
+- **Audit trail**: stdout and stderr go to a log file that any number of clients can stream from the start, live, until the job exits.
+
+I started it as a take-home in 2024 and came back to it in 2026 to fix races and cleanup bugs found in review.
+
+### Where to look
+
+- [job.go](./job.go) - job lifecycle: `Start`, `Wait`, `Stop`, `Status`, `Logs`, and the locking between them.
+- [job_linux.go](./job_linux.go) - namespaces, cgroup limits, and the inotify based log reader.
+- [internal/service/service.go](./internal/service/service.go) - gRPC service and per-user authz.
+- [job_test.go](./job_test.go) - concurrency and lifecycle tests, run with `-race` as root in CI.
+
+The library only runs on Linux. On other platforms it builds, and `Start` returns an error wrapping `ErrUnsupported`.
+
 # Library Demo
 ```bash
 $ git clone https://github.com/neildo/tjob
